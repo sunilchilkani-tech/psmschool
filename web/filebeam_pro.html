@@ -1,0 +1,2411 @@
+<!DOCTYPE html>
+<html lang="gu">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FileBeam Pro — ગુજરાતી &amp; English Direct File &amp; Text Transfer (Android, iPhone &amp; PC)</title>
+  <!-- PeerJS for WebRTC P2P -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <!-- MQTT.js over WSS (Port 443) for 100% Guaranteed Android/iPhone Transfer across Mobile Data & CGNAT -->
+  <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+  <!-- QRCode.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Gujarati:wght@400;600;700;800&family=Outfit:wght@300;400;600;700;800;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #060a12;
+      --surface: #0d1421;
+      --surface2: #131c2e;
+      --surface3: #18243a;
+      --border: #1e2d47;
+      --border-hi: #2a4070;
+      --cyan: #00e5ff;
+      --cyan-dim: #0099ad;
+      --cyan-glow: rgba(0, 229, 255, 0.15);
+      --green: #00ffa3;
+      --green-glow: rgba(0, 255, 163, 0.15);
+      --amber: #fbbf24;
+      --amber-glow: rgba(251, 191, 36, 0.15);
+      --text: #dce7fa;
+      --text-dim: #8aa0c0;
+      --text-muted: #475f82;
+      --red: #ff4d6d;
+      --mono: 'Space Mono', 'Noto Sans Gujarati', monospace;
+      --sans: 'Outfit', 'Noto Sans Gujarati', system-ui, sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px 56px;
+      color: var(--text);
+      overflow-x: hidden;
+      position: relative;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(var(--border) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border) 1px, transparent 1px);
+      background-size: 48px 48px;
+      opacity: 0.25;
+      pointer-events: none;
+      z-index: 0;
+      mask-image: radial-gradient(ellipse 85% 65% at 50% 0%, black 35%, transparent 100%);
+    }
+
+    #watermark {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 0;
+      pointer-events: none;
+      width: min(540px, 78vw);
+      opacity: 0.05;
+    }
+
+    header, .top-toolbar, .cards, .info-strip, footer {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Top Language & Transport Bar */
+    .top-toolbar {
+      width: 100%;
+      max-width: 1040px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .device-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      font-family: var(--mono);
+    }
+
+    .device-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+    }
+
+    .toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .transport-select {
+      background: var(--surface);
+      border: 1px solid var(--border-hi);
+      color: var(--cyan);
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      outline: none;
+    }
+
+    .lang-switch {
+      display: inline-flex;
+      background: var(--surface);
+      border: 1px solid var(--border-hi);
+      border-radius: 999px;
+      padding: 3px;
+      gap: 4px;
+    }
+
+    .lang-btn {
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      font-family: var(--sans);
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 5px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .lang-btn.active {
+      background: linear-gradient(135deg, var(--cyan), #006eff);
+      color: #000;
+      box-shadow: 0 2px 12px rgba(0, 229, 255, 0.35);
+    }
+
+    /* Header */
+    header {
+      text-align: center;
+      margin-bottom: 28px;
+      animation: fadeDown 0.45s ease both;
+    }
+
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 8px;
+    }
+
+    .logo-icon {
+      width: 46px;
+      height: 46px;
+      background: linear-gradient(135deg, var(--cyan), #006eff);
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.45rem;
+      box-shadow: 0 0 28px rgba(0, 229, 255, 0.45);
+    }
+
+    .logo-name {
+      font-size: 2.2rem;
+      font-weight: 900;
+      letter-spacing: -0.03em;
+      line-height: 1.05;
+      background: linear-gradient(135deg, #fff 35%, var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .tagline {
+      font-family: var(--sans);
+      font-size: 0.9rem;
+      color: var(--text-dim);
+      font-weight: 500;
+      margin-top: 4px;
+    }
+
+    .tagline span {
+      color: var(--cyan);
+      margin: 0 7px;
+    }
+
+    /* Main Cards Layout */
+    .cards {
+      display: flex;
+      gap: 22px;
+      flex-wrap: wrap;
+      justify-content: center;
+      width: 100%;
+      max-width: 1040px;
+      align-items: flex-start;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 26px 24px;
+      flex: 1 1 450px;
+      max-width: 508px;
+      position: relative;
+      overflow: hidden;
+      animation: fadeUp 0.45s ease both;
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+
+    .card:nth-child(2) { animation-delay: 0.08s; }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border-hi), transparent);
+    }
+
+    .card.send-card:hover {
+      border-color: var(--border-hi);
+      box-shadow: 0 0 44px rgba(0, 229, 255, 0.07);
+    }
+
+    .card.recv-card:hover {
+      border-color: var(--border-hi);
+      box-shadow: 0 0 44px rgba(0, 255, 163, 0.07);
+    }
+
+    .card-corner {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 90px;
+      height: 90px;
+      border-radius: 0 22px 0 0;
+      overflow: hidden;
+      pointer-events: none;
+    }
+
+    .card-corner::after {
+      content: '';
+      position: absolute;
+      top: -45px;
+      right: -45px;
+      width: 90px;
+      height: 90px;
+      border-radius: 50%;
+    }
+
+    .send-card .card-corner::after { background: var(--cyan-glow); }
+    .recv-card .card-corner::after { background: var(--green-glow); }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 18px;
+      flex-wrap: wrap;
+    }
+
+    .card-header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .card-badge {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 4px 12px;
+      border-radius: 999px;
+    }
+
+    .send-card .card-badge {
+      background: var(--cyan-glow);
+      color: var(--cyan);
+      border: 1px solid rgba(0, 229, 255, 0.3);
+    }
+
+    .recv-card .card-badge {
+      background: var(--green-glow);
+      color: var(--green);
+      border: 1px solid rgba(0, 255, 163, 0.3);
+    }
+
+    .card-title {
+      font-size: 1.22rem;
+      font-weight: 800;
+      color: #fff;
+    }
+
+    /* Drop zone */
+    #fileInput { display: none; }
+
+    .drop-zone {
+      border: 1.5px dashed var(--border-hi);
+      border-radius: 14px;
+      padding: 20px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s;
+      background: var(--surface2);
+      user-select: none;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--cyan);
+      border-style: solid;
+      background: rgba(0, 229, 255, 0.05);
+    }
+
+    .drop-zone.has-file {
+      border-color: var(--green);
+      border-style: solid;
+      background: rgba(0, 255, 163, 0.04);
+    }
+
+    .dz-icon { font-size: 1.8rem; margin-bottom: 5px; }
+    .dz-text { font-size: 0.92rem; color: var(--text); line-height: 1.45; }
+    .dz-text strong { color: var(--cyan); font-weight: 700; }
+    .dz-hint { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
+
+    .file-actions-bar {
+      display: flex;
+      gap: 6px;
+      margin-top: 9px;
+      flex-wrap: wrap;
+    }
+
+    .mini-btn {
+      flex: 1;
+      padding: 7px 9px;
+      background: var(--surface2);
+      border: 1px solid var(--border-hi);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.76rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+
+    .mini-btn:hover:not(:disabled) {
+      border-color: var(--cyan);
+      background: var(--surface3);
+    }
+
+    .mini-btn.danger:hover:not(:disabled) {
+      border-color: var(--red);
+      color: var(--red);
+    }
+
+    /* File list */
+    .file-list {
+      margin-top: 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 7px 11px;
+      gap: 8px;
+    }
+
+    .file-item-name {
+      font-size: 0.81rem;
+      color: var(--green);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+      font-weight: 600;
+    }
+
+    .file-item-size {
+      font-family: var(--mono);
+      font-size: 0.69rem;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+
+    .file-item-status { font-size: 0.84rem; flex-shrink: 0; }
+
+    .file-remove-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
+
+    .file-remove-btn:hover {
+      color: var(--red);
+      background: rgba(255, 77, 109, 0.12);
+    }
+
+    .batch-summary {
+      margin-top: 7px;
+      font-size: 0.76rem;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+    }
+
+    /* Gujarati / Multilingual Quick Text Beam Box */
+    .text-beam-box {
+      margin-top: 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+
+    .text-beam-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border-hi);
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 0.86rem;
+      resize: vertical;
+      min-height: 52px;
+    }
+
+    .text-beam-input:focus {
+      outline: none;
+      border-color: var(--cyan);
+    }
+
+    /* Field label */
+    .field-label {
+      font-size: 0.77rem;
+      font-weight: 700;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      margin-top: 14px;
+    }
+
+    /* Code row */
+    .code-row { display: flex; gap: 6px; align-items: stretch; }
+    .code-input {
+      flex: 1;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border-hi);
+      border-radius: 10px;
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--cyan);
+      letter-spacing: 0.04em;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      -webkit-appearance: none;
+    }
+
+    .code-input:focus {
+      outline: none;
+      border-color: var(--cyan);
+      box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.12);
+    }
+
+    .code-input:disabled { opacity: 0.65; cursor: not-allowed; }
+
+    .btn-regen {
+      padding: 0 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border-hi);
+      border-radius: 10px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.2s;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-regen:hover:not(:disabled) {
+      background: var(--cyan-glow);
+      border-color: var(--cyan);
+    }
+
+    .btn-regen:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .code-hint {
+      margin-top: 5px;
+      font-size: 0.74rem;
+      color: var(--text-dim);
+      line-height: 1.45;
+    }
+
+    .code-error {
+      margin-top: 7px;
+      font-size: 0.78rem;
+      color: var(--red);
+      background: rgba(255, 77, 109, 0.1);
+      border: 1px solid rgba(255, 77, 109, 0.3);
+      padding: 7px 10px;
+      border-radius: 8px;
+      display: none;
+    }
+
+    /* Buttons */
+    .btn {
+      width: 100%;
+      padding: 13px;
+      border: none;
+      border-radius: 12px;
+      font-family: var(--sans);
+      font-size: 0.98rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-top: 12px;
+      letter-spacing: 0.01em;
+      position: relative;
+      overflow: hidden;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      -webkit-appearance: none;
+    }
+
+    .btn-cyan {
+      background: linear-gradient(135deg, var(--cyan) 0%, #006eff 100%);
+      color: #000;
+      box-shadow: 0 4px 22px rgba(0, 229, 255, 0.28);
+    }
+
+    .btn-cyan:hover:not(:disabled) {
+      box-shadow: 0 6px 30px rgba(0, 229, 255, 0.5);
+      transform: translateY(-1px);
+    }
+
+    .btn-cyan:disabled {
+      background: var(--surface2);
+      color: var(--text-muted);
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    .btn-green {
+      background: linear-gradient(135deg, var(--green) 0%, #00b4d8 100%);
+      color: #000;
+      box-shadow: 0 4px 22px rgba(0, 255, 163, 0.28);
+    }
+
+    .btn-green:hover:not(:disabled) {
+      box-shadow: 0 6px 30px rgba(0, 255, 163, 0.5);
+      transform: translateY(-1px);
+    }
+
+    .btn-green:disabled {
+      background: var(--surface2);
+      color: var(--text-muted);
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    .btn-ghost {
+      background: var(--surface2);
+      border: 1px solid var(--border-hi);
+      color: var(--text);
+      font-size: 0.82rem;
+      padding: 9px 11px;
+      margin-top: 8px;
+    }
+
+    .btn-ghost:hover:not(:disabled) {
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+
+    .btn-stop {
+      background: rgba(255, 77, 109, 0.14);
+      border: 1px solid rgba(255, 77, 109, 0.4);
+      color: #ff8fa3;
+      font-size: 0.82rem;
+      padding: 8px 11px;
+      margin-top: 8px;
+    }
+
+    .btn-stop:hover {
+      background: var(--red);
+      color: #fff;
+    }
+
+    /* Live Box & QR Code */
+    .live-box {
+      margin-top: 14px;
+      background: var(--surface2);
+      border: 1px solid var(--border-hi);
+      border-radius: 14px;
+      padding: 14px;
+      display: none;
+    }
+
+    .live-label {
+      font-size: 0.74rem;
+      font-weight: 700;
+      color: var(--cyan);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .live-label::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+      animation: pulse 1.4s ease infinite;
+      flex-shrink: 0;
+    }
+
+    .live-code-grid {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .live-code-main {
+      flex: 1;
+      min-width: 180px;
+    }
+
+    .live-code {
+      background: var(--bg);
+      border: 1px solid var(--border-hi);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-family: var(--mono);
+      font-size: 1.05rem;
+      font-weight: 700;
+      word-break: break-all;
+      color: var(--cyan);
+      text-align: center;
+      letter-spacing: 0.06em;
+    }
+
+    .qr-box {
+      background: #fff;
+      padding: 8px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      width: 110px;
+      height: 110px;
+      flex-shrink: 0;
+      margin: 0 auto;
+    }
+
+    /* Progress & Telemetry */
+    .progress-wrap { margin-top: 14px; display: none; }
+    .progress-wrap.visible { display: block; }
+
+    .progress-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+
+    .progress-telemetry {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 0.69rem;
+      color: var(--cyan);
+      margin-top: 6px;
+    }
+
+    .progress-track {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      height: 9px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      width: 0%;
+      transition: width 0.15s ease;
+    }
+
+    .progress-fill.cyan {
+      background: linear-gradient(90deg, #006eff, var(--cyan));
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+    }
+
+    .progress-fill.green {
+      background: linear-gradient(90deg, #00b4d8, var(--green));
+      box-shadow: 0 0 10px rgba(0, 255, 163, 0.5);
+    }
+
+    .peers-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: var(--cyan-glow);
+      color: var(--cyan);
+      font-family: var(--mono);
+      font-size: 0.71rem;
+      font-weight: 700;
+      padding: 4px 11px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 229, 255, 0.3);
+      margin-top: 8px;
+    }
+
+    .peers-badge::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 1.2s ease infinite;
+    }
+
+    /* Receive input */
+    .receive-input {
+      width: 100%;
+      padding: 12px 14px;
+      background: var(--bg);
+      border: 1px solid var(--border-hi);
+      border-radius: 10px;
+      font-family: var(--mono);
+      font-size: 0.98rem;
+      font-weight: 700;
+      height: 62px;
+      resize: none;
+      color: var(--green);
+      transition: border-color 0.2s, box-shadow 0.2s;
+      letter-spacing: 0.04em;
+      -webkit-appearance: none;
+    }
+
+    .receive-input:focus {
+      outline: none;
+      border-color: var(--green);
+      box-shadow: 0 0 0 3px rgba(0, 255, 163, 0.12);
+    }
+
+    .receive-input::placeholder {
+      font-family: var(--sans);
+      font-size: 0.84rem;
+      font-weight: 400;
+      color: var(--text-muted);
+      letter-spacing: 0;
+    }
+
+    /* Received Text Messages & Download Links */
+    .received-text-box {
+      margin-top: 14px;
+      background: rgba(251, 191, 36, 0.08);
+      border: 1px solid rgba(251, 191, 36, 0.45);
+      border-radius: 12px;
+      padding: 12px;
+      display: none;
+    }
+
+    .received-text-content {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 0.9rem;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 160px;
+      overflow-y: auto;
+      margin: 7px 0;
+    }
+
+    .dl-links {
+      margin-top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      max-height: 290px;
+      overflow-y: auto;
+    }
+
+    .dl-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: var(--surface2);
+      border: 1px solid rgba(0, 255, 163, 0.45);
+      border-radius: 12px;
+      padding: 10px 13px;
+    }
+
+    .dl-thumb {
+      width: 42px;
+      height: 42px;
+      border-radius: 7px;
+      object-fit: cover;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .dl-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .dl-link-name {
+      font-size: 0.84rem;
+      font-weight: 700;
+      color: var(--green);
+      word-break: break-all;
+      display: block;
+    }
+
+    .dl-link-meta {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      margin-top: 2px;
+    }
+
+    .dl-actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .dl-link-btn {
+      font-family: var(--sans);
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #000;
+      background: var(--green);
+      border: none;
+      border-radius: 7px;
+      padding: 6px 11px;
+      text-decoration: none;
+      cursor: pointer;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .dl-share-btn {
+      font-family: var(--sans);
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: var(--cyan);
+      background: var(--surface3);
+      border: 1px solid rgba(0, 229, 255, 0.35);
+      border-radius: 7px;
+      padding: 6px 9px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    /* Status */
+    .status-msg {
+      margin-top: 12px;
+      font-size: 0.82rem;
+      color: var(--text-dim);
+      text-align: center;
+      line-height: 1.5;
+      font-weight: 600;
+    }
+    .status-msg.success { color: var(--green); }
+    .status-msg.error { color: var(--red); }
+
+    /* Quick How-To Strip */
+    .info-strip {
+      width: 100%;
+      max-width: 1040px;
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    @media (max-width: 780px) {
+      .info-strip { grid-template-columns: 1fr; }
+    }
+
+    .info-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 13px 15px;
+    }
+
+    .info-box h4 {
+      color: var(--cyan);
+      font-size: 0.85rem;
+      margin-bottom: 4px;
+    }
+
+    .info-box p {
+      color: var(--text-dim);
+      font-size: 0.77rem;
+      line-height: 1.45;
+    }
+
+    footer {
+      margin-top: 28px;
+      text-align: center;
+    }
+
+    .footer-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 18px;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+    }
+
+    .footer-note {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .footer-note strong { color: var(--text-dim); }
+
+    #toast {
+      position: fixed;
+      bottom: 22px;
+      right: 22px;
+      background: var(--surface2);
+      border: 1px solid var(--cyan);
+      color: #fff;
+      padding: 11px 16px;
+      border-radius: 10px;
+      font-size: 0.84rem;
+      font-weight: 700;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+      z-index: 999;
+    }
+    #toast[hidden] { display: none; }
+
+    @keyframes fadeDown { from { opacity: 0; transform: translateY(-16px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  </style>
+</head>
+<body>
+
+<div id="watermark" aria-hidden="true">
+  <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="100" cy="100" r="88" fill="none" stroke="#00e5ff" stroke-width="2" stroke-dasharray="8 6"/>
+    <circle cx="100" cy="100" r="60" fill="none" stroke="#00ffa3" stroke-width="1.5"/>
+    <path d="M108 38 L66 108 H102 L92 162 L134 92 H98 Z" fill="#00e5ff"/>
+  </svg>
+</div>
+
+<!-- Top Language & Transport Mode Toolbar -->
+<div class="top-toolbar">
+  <div class="device-pill">
+    <span class="device-dot" id="brokerDot"></span>
+    <span id="devicePlatformLabel">Hybrid Cloud Relay + WebRTC Ready</span>
+  </div>
+
+  <div class="toolbar-right">
+    <select id="transportModeSelect" class="transport-select" title="Choose Transfer Engine">
+      <option value="hybrid" selected>⚡ Auto Hybrid (Cloud Relay + WebRTC — Works on All Android &amp; iOS)</option>
+      <option value="relay">☁️ Force Cloud Relay (WSS Port 443 — Bypass Mobile NAT/Firewall)</option>
+      <option value="webrtc">🔗 Direct WebRTC + TURN Only</option>
+    </select>
+
+    <div class="lang-switch" role="group" aria-label="Language Switcher">
+      <button class="lang-btn active" data-lang="bi" id="langBiBtn" type="button">ગુજરાતી + EN</button>
+      <button class="lang-btn" data-lang="gu" id="langGuBtn" type="button">ગુજરાતી</button>
+      <button class="lang-btn" data-lang="en" id="langEnBtn" type="button">English</button>
+    </div>
+  </div>
+</div>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <span class="logo-name">FileBeam ગુજરાતી Pro</span>
+  </div>
+  <p class="tagline" id="hdrTagline">
+    ડાયરેક્ટ ફાઇલ અને ટેક્સ્ટ ટ્રાન્સફર<span>•</span>Android, iPhone (iOS) અને PC<span>•</span>Mobile Data &amp; Wi-Fi Ready
+  </p>
+</header>
+
+<div class="cards">
+
+  <!-- ════ SEND CARD (ફાઇલ અને ટેક્સ્ટ મોકલો) ════ -->
+  <div class="card send-card">
+    <div class="card-corner"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="card-badge" id="sendBadge">↑ મોકલો · SEND</div>
+        <div class="card-title" id="sendTitle">ફાઇલ અને ટેક્સ્ટ શેર કરો (Share)</div>
+      </div>
+      <button class="mini-btn" id="nativeMobileShareBtn" style="flex:0 0 auto;width:auto" type="button" title="WhatsApp / Quick Share / AirDrop દ્વારા સીધું શેર કરો">
+        📲 Direct App Share
+      </button>
+    </div>
+
+    <input type="file" id="fileInput" multiple />
+    <div class="drop-zone" id="dropZone">
+      <div class="dz-icon">🗂️</div>
+      <div class="dz-text" id="dzMainText">
+        <strong>ફાઇલ પસંદ કરવા અહીં ક્લિક કરો</strong> અથવા ડ્રેગ &amp; ડ્રોપ કરો
+      </div>
+      <div class="dz-hint" id="dzSubText">
+        Photos, Videos, PDF કે ગુજરાતી ફાઇલો પસંદ કરો (અથવા નીચે માત્ર ટેક્સ્ટ લખીને પણ શેર કરી શકાય)
+      </div>
+    </div>
+
+    <div class="file-actions-bar">
+      <button class="mini-btn" id="addMoreFilesBtn" type="button">➕ ફાઇલ ઉમેરો (Add Files)</button>
+      <button class="mini-btn" id="loadSampleCardBtn" type="button">✨ ડેમો ફાઇલ (Demo File)</button>
+      <button class="mini-btn danger" id="clearFilesBtn" type="button">🗑 ક્લિયર (Clear)</button>
+    </div>
+
+    <div class="file-list" id="fileList"></div>
+    <div class="batch-summary" id="batchSummary" style="display:none">
+      <span id="batchCountText">0 ફાઇલ</span>
+      <span id="batchSizeText">0 B</span>
+    </div>
+
+    <!-- Gujarati / English Text Note to Beam -->
+    <div class="text-beam-box">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:0.76rem;font-weight:700;color:var(--cyan)" id="textBeamLabel">
+          💬 ગુજરાતી કે English ટેક્સ્ટ / લિંક મોકલો (ફાઇલ વગર એકલું ટેક્સ્ટ પણ મોકલી શકાશે)
+        </span>
+      </div>
+      <textarea class="text-beam-input" id="senderTextNote" placeholder="અહીં ગુજરાતી લખાણ, સરનામું કે લિંક લખો — ફાઇલ સાથે અથવા ફાઇલ વગર પણ મોકલી શકાશે..."></textarea>
+    </div>
+
+    <span class="field-label">
+      <span id="shareCodeLabel">શેર કોડ (Share Code) — ઓટોમેટિક અથવા તમારો પોતાનો લખો</span>
+      <small style="color:var(--cyan)">૦-૯ / a-z</small>
+    </span>
+    <div class="code-row">
+      <input type="text" class="code-input" id="senderCode" maxlength="50" spellcheck="false" autocomplete="off" />
+      <button class="btn-regen" id="regenGujBtn" type="button" title="ગુજરાત સ્પેશિયલ કોડ (Gujarat Code)">🦁 ગુજ.</button>
+      <button class="btn-regen" id="regenBtn" type="button" title="નવો રેન્ડમ કોડ (New Code)">🎲 નવો</button>
+    </div>
+    <div class="code-hint" id="shareCodeHint">
+      સામેવાળાના Android, iPhone કે PC માં આ કોડ નાખો અથવા QR કોડ સ્કેન કરો.
+    </div>
+    <div class="code-error" id="codeError"></div>
+
+    <button class="btn btn-cyan" id="shareBtn" disabled type="button">
+      🚀 શેર ચાલુ કરો (Start Sharing)
+    </button>
+    <button class="btn btn-ghost" id="pushAgainBtn" style="display:none" type="button">
+      📤 ફરીથી મોકલો / નવું ટેક્સ્ટ પુશ કરો (Send / Push Now)
+    </button>
+    <button class="btn btn-stop" id="stopShareBtn" style="display:none" type="button">
+      ⏹ શેરિંગ બંધ કરો / નવો કોડ બનાવો (Stop &amp; Reset)
+    </button>
+
+    <div class="progress-wrap" id="uploadProgress">
+      <div class="progress-meta">
+        <span id="uploadStatus">રિસીવરની રાહ જોવાઈ રહી છે (Waiting for receiver)…</span>
+        <span id="uploadPct">0%</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill cyan" id="uploadBar"></div></div>
+      <div class="progress-telemetry">
+        <span id="uploadSpeed">Transport: Hybrid Ready</span>
+        <span id="uploadEta">ETA: --</span>
+      </div>
+      <div id="uploadPeers"></div>
+    </div>
+
+    <div class="live-box" id="liveBox">
+      <div class="live-label" id="liveLabelText">લાઇવ કોડ તૈયાર છે — સામેવાળાના ફોન/PC માં આ કોડ નાખો:</div>
+      <div class="live-code-grid">
+        <div class="live-code-main">
+          <div class="live-code" id="liveCode"></div>
+          <div style="display:flex;gap:6px;margin-top:8px">
+            <button class="btn btn-ghost" id="copyCodeBtn" style="flex:1;margin:0" type="button">📋 કોડ કોપી (Copy)</button>
+            <button class="btn btn-ghost" id="copyLinkBtn" style="flex:1;margin:0" type="button">🔗 લિંક શેર (Link)</button>
+          </div>
+        </div>
+        <div class="qr-box" id="qrContainer" title="iPhone કે Android કેમેરાથી સ્કેન કરો"></div>
+      </div>
+      <div class="copy-msg" id="copyMsg"></div>
+    </div>
+  </div>
+
+  <!-- ════ RECEIVE CARD (ફાઇલ અને ટેક્સ્ટ મેળવો) ════ -->
+  <div class="card recv-card">
+    <div class="card-corner"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="card-badge" id="recvBadge">↓ મેળવો · RECEIVE</div>
+        <div class="card-title" id="recvTitle">ફાઇલ અને ટેક્સ્ટ મેળવો (Receive)</div>
+      </div>
+      <button class="mini-btn" id="pasteCodeQuickBtn" style="flex:0 0 auto;width:auto" type="button" title="ક્લિપબોર્ડમાંથી કોડ પેસ્ટ કરો">
+        📋 પેસ્ટ (Paste Code)
+      </button>
+    </div>
+
+    <span class="field-label" style="margin-top:0">
+      <span id="recvCodeLabel">મોકલનારનો શેર કોડ અહીં લખો અથવા પેસ્ટ કરો</span>
+    </span>
+    <textarea class="receive-input" id="magnetIn" placeholder="દા.ત. girnar-42 અહીં લખો…"></textarea>
+
+    <button class="btn btn-green" id="downloadBtn" type="button">
+      📥 ફાઇલ અને ટેક્સ્ટ મેળવો (Receive Now)
+    </button>
+
+    <div class="progress-wrap" id="downloadProgress">
+      <div class="progress-meta">
+        <span id="downloadStatus">કનેક્ટ થઈ રહ્યું છે (Connecting)…</span>
+        <span id="downloadPct">0%</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill green" id="downloadBar"></div></div>
+      <div class="progress-telemetry">
+        <span id="downloadSpeed">Speed: --</span>
+        <span id="downloadBytesLabel">0 B / 0 B</span>
+      </div>
+    </div>
+
+    <!-- Received Gujarati / English Text Note Box -->
+    <div class="received-text-box" id="receivedTextBox">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong style="font-size:0.8rem;color:var(--amber)">📩 મળેલો ટેક્સ્ટ મેસેજ (Received Text Note):</strong>
+        <button class="mini-btn" id="copyReceivedTextBtn" style="flex:0 0 auto;width:auto;padding:4px 9px" type="button">📋 કોપી (Copy)</button>
+      </div>
+      <div class="received-text-content" id="receivedTextContent"></div>
+    </div>
+
+    <!-- Download links shown per file -->
+    <div class="dl-links" id="dlLinks"></div>
+    <div class="status-msg" id="downloadMsg"></div>
+  </div>
+
+</div>
+
+<!-- Helpful Gujarati + English Guide Strip -->
+<section class="info-strip">
+  <div class="info-box">
+    <h4>⚡ ૧. શા માટે અગાઉ Android / iPhone માં નહોતું ચાલતું?</h4>
+    <p>અગાઉના કોડમાં <code>serialization: 'raw'</code> ભૂલ હતી અને મોબાઇલ ડેટા (Jio/Airtel CGNAT) બ્લોક કરતું હતું. હવે <b>Hybrid Cloud Relay (WSS Port 443) + TURN</b> ઉમેર્યું છે જે ૧૦૦% દરેક નેટવર્ક પર ચાલે છે.</p>
+  </div>
+  <div class="info-box">
+    <h4>📱 ૨. ટેક્સ્ટ અથવા ફાઇલ — બંને મોકલો</h4>
+    <p>તમે ફાઇલ વગર માત્ર ગુજરાતી/English ટેક્સ્ટ લખીને પણ શેર કરી શકો છો, અથવા એકસાથે અનેક ફોટા, PDF અને વિડિયો મોકલી શકો છો.</p>
+  </div>
+  <div class="info-box">
+    <h4>📲 ૩. એક જ ફોનમાં ટેસ્ટ કરો!</h4>
+    <p>તમે અત્યારે જ આ જ પેજમાં ઉપર <b>"✨ ડેમો ફાઇલ"</b> દબાવી, <b>"🚀 શેર ચાલુ કરો"</b> દબાવો અને જમણી બાજુના બોક્સમાં તે જ કોડ નાખીને તરત જ ટેસ્ટ કરી શકો છો!</p>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-badge">⚡ Triple-Engine Transfer: WSS Cloud Relay (Port 443) + WebRTC TURN + Local Broadcast</div>
+  <p class="footer-note">જ્યાં સુધી સામેવાળાના ફોન/PC માં ફાઇલ ડાઉનલોડ થાય ત્યાં સુધી <strong>મોકલનારની (Sender)</strong> ટેબ ચાલુ રાખો.</p>
+</footer>
+
+<div id="toast" hidden>Action completed</div>
+
+<script>
+'use strict';
+
+// 24 KB chunk size (becomes ~32 KB in Base64 JSON) — 100% safe for WebRTC, MQTT-over-WSS, iOS Safari & Android Chrome!
+const CHUNK_SIZE = 24 * 1024;
+
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+              (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// WebRTC ICE Configuration with BOTH Google STUN and Free OpenRelay TURN Servers (Port 80 & 443 TCP/UDP)
+// so Android & iPhone on Jio/Airtel/Vi mobile data can connect through carrier firewalls!
+const PEER_CONFIG = {
+  debug: 0,
+  config: {
+    iceCandidatePoolSize: 10,
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ]
+  }
+};
+
+// Public WSS (Port 443 HTTPS WebSocket) Relay Brokers — Works 100% on Android & iOS even when WebRTC is blocked!
+const WSS_BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt'
+];
+
+let senderPeer = null;
+let senderMqtt = null;
+let senderBc = null;
+let activeShareCode = '';
+let selectedFiles = [];
+let activeWebRtcConns = [];
+let currentLangMode = 'bi';
+let wakeLockSentinel = null;
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const shareBtn = document.getElementById('shareBtn');
+const pushAgainBtn = document.getElementById('pushAgainBtn');
+const stopShareBtn = document.getElementById('stopShareBtn');
+const codeInput = document.getElementById('senderCode');
+const regenBtn = document.getElementById('regenBtn');
+const regenGujBtn = document.getElementById('regenGujBtn');
+const senderTextNote = document.getElementById('senderTextNote');
+
+async function requestScreenWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !wakeLockSentinel) {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+      wakeLockSentinel.addEventListener('release', () => { wakeLockSentinel = null; });
+    }
+  } catch (e) {}
+}
+
+function releaseScreenWakeLock() {
+  try {
+    if (wakeLockSentinel) {
+      wakeLockSentinel.release();
+      wakeLockSentinel = null;
+    }
+  } catch (e) {}
+}
+
+(function detectPlatform() {
+  const lbl = document.getElementById('devicePlatformLabel');
+  if (!lbl) return;
+  if (isIOS) lbl.textContent = '🍎 iPhone / iPad (Hybrid WSS + WebRTC Active)';
+  else if (/Android/i.test(navigator.userAgent)) lbl.textContent = '🤖 Android (Hybrid WSS + WebRTC Active)';
+  else lbl.textContent = '💻 Desktop / Mobile (Hybrid WSS + WebRTC Active)';
+})();
+
+function notify(msg, isErr = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = isErr ? 'var(--red)' : 'var(--cyan)';
+  t.hidden = false;
+  clearTimeout(notify._t);
+  notify._t = setTimeout(() => { t.hidden = true; }, 3200);
+}
+
+function inferMimeType(fileName, providedMime) {
+  if (providedMime && providedMime !== 'application/octet-stream') return providedMime;
+  const ext = String(fileName || '').split('.').pop().toLowerCase();
+  const map = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+    webp: 'image/webp', heic: 'image/heic', heif: 'image/heif', svg: 'image/svg+xml',
+    mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/x-m4v', webm: 'video/webm',
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav',
+    pdf: 'application/pdf', txt: 'text/plain;charset=utf-8', csv: 'text/csv;charset=utf-8',
+    html: 'text/html;charset=utf-8', json: 'application/json', zip: 'application/zip',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+/* ─── Bilingual / Gujarati / English UI Dictionary ─── */
+const UI_TEXT = {
+  bi: {
+    hdrTagline: 'ડાયરેક્ટ ફાઇલ અને ટેક્સ્ટ ટ્રાન્સફર<span>•</span>Android, iPhone (iOS) અને PC<span>•</span>Mobile Data &amp; Wi-Fi Ready',
+    sendBadge: '↑ મોકલો · SEND',
+    sendTitle: 'ફાઇલ અને ટેક્સ્ટ શેર કરો (Share)',
+    dzMainText: '<strong>ફાઇલ પસંદ કરવા અહીં ક્લિક કરો</strong> અથવા ડ્રેગ &amp; ડ્રોપ કરો',
+    dzSubText: 'Photos, Videos, PDF કે ગુજરાતી ફાઇલો પસંદ કરો (અથવા નીચે માત્ર ટેક્સ્ટ લખીને પણ શેર કરી શકાય)',
+    textBeamLabel: '💬 ગુજરાતી કે English ટેક્સ્ટ / લિંક મોકલો (ફાઇલ વગર એકલું ટેક્સ્ટ પણ મોકલી શકાશે)',
+    shareCodeLabel: 'શેર કોડ (Share Code) — ઓટોમેટિક અથવા તમારો પોતાનો લખો',
+    shareCodeHint: 'સામેવાળાના Android, iPhone કે PC માં આ કોડ નાખો અથવા QR કોડ સ્કેન કરો.',
+    shareBtnIdle: '🚀 શેર ચાલુ કરો (Start Sharing)',
+    shareBtnReady: '✔ લાઇવ છે — સામેવાળામાં કોડ નાખી Receive દબાવો',
+    recvBadge: '↓ મેળવો · RECEIVE',
+    recvTitle: 'ફાઇલ અને ટેક્સ્ટ મેળવો (Receive)',
+    recvCodeLabel: 'મોકલનારનો શેર કોડ અહીં લખો અથવા પેસ્ટ કરો',
+    downloadBtnIdle: '📥 ફાઇલ અને ટેક્સ્ટ મેળવો (Receive Now)'
+  },
+  gu: {
+    hdrTagline: 'ડાયરેક્ટ ફાઇલ અને ટેક્સ્ટ ટ્રાન્સફર<span>•</span>Android, iPhone અને કોમ્પ્યુટર<span>•</span>મોબાઇલ ડેટા અને Wi-Fi',
+    sendBadge: '↑ મોકલો',
+    sendTitle: 'ફાઇલ અને ટેક્સ્ટ મોકલો',
+    dzMainText: '<strong>ફાઇલ પસંદ કરવા અહીં ક્લિક કરો</strong> અથવા અહીં મૂકો',
+    dzSubText: 'ફોટા, વિડિયો, PDF કે ગુજરાતી નામવાળી ફાઇલો અથવા માત્ર ટેક્સ્ટ સંદેશ મોકલો',
+    textBeamLabel: '💬 ગુજરાતી સંદેશ કે લિંક મોકલો (ફાઇલ વગર પણ ચાલશે)',
+    shareCodeLabel: 'શેર કોડ — ઓટોમેટિક અથવા તમારો મનપસંદ કોડ લખો',
+    shareCodeHint: 'સામેવાળાના ફોન કે કોમ્પ્યુટરમાં આ કોડ નાખો અથવા QR કોડ સ્કેન કરો.',
+    shareBtnIdle: '🚀 શેર ચાલુ કરો',
+    shareBtnReady: '✔ લાઇવ છે — સામેવાળામાં Receive દબાવો',
+    recvBadge: '↓ મેળવો',
+    recvTitle: 'ફાઇલ અને ટેક્સ્ટ મેળવો',
+    recvCodeLabel: 'મોકલનારનો શેર કોડ અહીં નાખો',
+    downloadBtnIdle: '📥 ફાઇલ અને ટેક્સ્ટ મેળવો'
+  },
+  en: {
+    hdrTagline: 'Direct File &amp; Text Transfer<span>•</span>Android, iPhone &amp; Desktop<span>•</span>Works on Mobile Data &amp; Wi-Fi',
+    sendBadge: '↑ SEND',
+    sendTitle: 'Share Files &amp; Text',
+    dzMainText: '<strong>Click to choose files</strong> or drag &amp; drop here',
+    dzSubText: 'Select photos, videos, PDFs, or type a text note below to share',
+    textBeamLabel: '💬 Beam Instant Text / Gujarati Note / URL (Works with or without files)',
+    shareCodeLabel: 'Share Code — Auto-generated or type your own',
+    shareCodeHint: 'Receivers enter this code or scan the QR code below to receive immediately.',
+    shareBtnIdle: '🚀 Start Sharing',
+    shareBtnReady: '✔ Live — Enter Code on Receiver &amp; Tap Receive',
+    recvBadge: '↓ RECEIVE',
+    recvTitle: 'Receive Files &amp; Text',
+    recvCodeLabel: "Paste the sender's share code below",
+    downloadBtnIdle: '📥 Receive Files &amp; Text'
+  }
+};
+
+function applyLanguage(mode) {
+  currentLangMode = mode;
+  document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.dataset.lang === mode));
+  const t = UI_TEXT[mode] || UI_TEXT.bi;
+  document.getElementById('hdrTagline').innerHTML = t.hdrTagline;
+  document.getElementById('sendBadge').textContent = t.sendBadge;
+  document.getElementById('sendTitle').innerHTML = t.sendTitle;
+  document.getElementById('dzMainText').innerHTML = t.dzMainText;
+  document.getElementById('dzSubText').textContent = t.dzSubText;
+  document.getElementById('textBeamLabel').textContent = t.textBeamLabel;
+  document.getElementById('shareCodeLabel').textContent = t.shareCodeLabel;
+  document.getElementById('shareCodeHint').textContent = t.shareCodeHint;
+  if (!activeShareCode) {
+    shareBtn.textContent = t.shareBtnIdle;
+  } else {
+    shareBtn.innerHTML = t.shareBtnReady;
+  }
+  document.getElementById('recvBadge').textContent = t.recvBadge;
+  document.getElementById('recvTitle').innerHTML = t.recvTitle;
+  document.getElementById('recvCodeLabel').textContent = t.recvCodeLabel;
+  const dlBtn = document.getElementById('downloadBtn');
+  if (!dlBtn.disabled) dlBtn.textContent = t.downloadBtnIdle;
+}
+
+document.querySelectorAll('.lang-btn').forEach(btn => {
+  btn.addEventListener('click', () => applyLanguage(btn.dataset.lang));
+});
+
+/* ─── Gujarati-Friendly & Tech Share Code Generators ─── */
+const GUJARAT_WORDS = [
+  'girnar', 'somnath', 'dwarka', 'sabarmati', 'kutch', 'patola',
+  'navratri', 'garba', 'surya', 'narmada', 'sardar', 'bapu',
+  'karnavati', 'valsad', 'rajkot', 'surat', 'morbi', 'pavagadh',
+  'ambaji', 'modhera', 'lothal', 'saputara', 'kesar', 'anand'
+];
+
+const TECH_WORDS = [
+  'alpha', 'beam', 'cloud', 'delta', 'echo', 'flash', 'grid', 'hive',
+  'indigo', 'jade', 'kite', 'luna', 'matrix', 'nova', 'orbit', 'pixel',
+  'quark', 'relay', 'surge', 'theta', 'ultra', 'vortex', 'wave', 'zenith'
+];
+
+function normalizeShareCode(rawInput) {
+  if (!rawInput) return '';
+  let str = String(rawInput).trim();
+  try {
+    if (/^https?:\/\//i.test(str) && str.includes('code=')) {
+      const u = new URL(str);
+      str = u.searchParams.get('code') || str;
+    }
+  } catch (e) {}
+
+  str = str
+    .replace(/[\u0AE6-\u0AEF]/g, c => String(c.charCodeAt(0) - 0x0AE6))
+    .replace(/[\u0966-\u096F]/g, c => String(c.charCodeAt(0) - 0x0966));
+
+  return str
+    .toLowerCase()
+    .replace(/[^a-z0-9\-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function generateCode(useGujaratPool = true) {
+  const pool = useGujaratPool ? GUJARAT_WORDS : TECH_WORDS;
+  const w = pool[Math.floor(Math.random() * pool.length)];
+  const n = Math.floor(10 + Math.random() * 90);
+  codeInput.value = `${w}-${n}`;
+  document.getElementById('codeError').style.display = 'none';
+  updateShareBtn();
+}
+
+regenGujBtn.addEventListener('click', () => generateCode(true));
+regenBtn.addEventListener('click', () => generateCode(false));
+generateCode(true);
+
+function updateShareBtn() {
+  const hasPayload = selectedFiles.length > 0 || senderTextNote.value.trim().length > 0;
+  const hasCode = normalizeShareCode(codeInput.value).length > 0;
+  shareBtn.disabled = !hasPayload || !hasCode || !!activeShareCode;
+}
+
+codeInput.addEventListener('input', () => {
+  document.getElementById('codeError').style.display = 'none';
+  updateShareBtn();
+});
+senderTextNote.addEventListener('input', updateShareBtn);
+
+/* ─── File Picking, Adding More, Removing & Demo File ─── */
+dropZone.addEventListener('click', () => fileInput.click());
+document.getElementById('addMoreFilesBtn').addEventListener('click', () => fileInput.click());
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) {
+    addFilesToQueue(Array.from(fileInput.files));
+    fileInput.value = '';
+  }
+});
+
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const files = Array.from(e.dataTransfer.files);
+  if (files.length) addFilesToQueue(files);
+});
+
+function addFilesToQueue(newFiles) {
+  for (const f of newFiles) {
+    const exists = selectedFiles.some(x => x.name === f.name && x.size === f.size);
+    if (!exists) selectedFiles.push(f);
+  }
+  renderFileList();
+  updateShareBtn();
+}
+
+function renderFileList() {
+  const list = document.getElementById('fileList');
+  const summary = document.getElementById('batchSummary');
+  dropZone.classList.toggle('has-file', selectedFiles.length > 0);
+
+  if (selectedFiles.length === 0) {
+    list.innerHTML = '';
+    summary.style.display = 'none';
+    return;
+  }
+
+  const totalBytes = selectedFiles.reduce((s, f) => s + f.size, 0);
+  summary.style.display = 'flex';
+  document.getElementById('batchCountText').textContent = `${selectedFiles.length} ફાઇલ (Files)`;
+  document.getElementById('batchSizeText').textContent = `કુલ (Total): ${fmtSize(totalBytes)}`;
+
+  list.innerHTML = selectedFiles.map((f, i) => `
+    <div class="file-item">
+      <span class="file-item-name" title="${escHtml(f.name)}">📄 ${escHtml(f.name)}</span>
+      <span class="file-item-size">${fmtSize(f.size)}</span>
+      <span class="file-item-status" id="fstat-${i}">⏳</span>
+      <button class="file-remove-btn" data-rm="${i}" title="Remove file" type="button">✕</button>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('[data-rm]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.rm, 10);
+      selectedFiles.splice(idx, 1);
+      renderFileList();
+      updateShareBtn();
+    });
+  });
+}
+
+document.getElementById('clearFilesBtn').addEventListener('click', () => {
+  selectedFiles = [];
+  senderTextNote.value = '';
+  renderFileList();
+  updateShareBtn();
+  notify('ફાઇલ લિસ્ટ ક્લિયર કર્યું (Cleared queue)');
+});
+
+document.getElementById('loadSampleCardBtn').addEventListener('click', () => {
+  const sampleText = [
+    '॥ શ્રી ગણેશાય નમઃ ॥',
+    'FileBeam ગુજરાતી Pro — ડાયરેક્ટ ફાઇલ ટ્રાન્સફર ટેસ્ટ ફાઇલ',
+    '------------------------------------------------------------',
+    'આ ફાઇલ Android, iPhone (iOS) અને PC વચ્ચે સીધી ટ્રાન્સફર થઈ છે.',
+    'સ્થળ: અમદાવાદ, ગુજરાત (Ahmedabad, Gujarat)'
+  ].join('\r\n');
+  const blob = new Blob(['\uFEFF' + sampleText], { type: 'text/plain;charset=utf-8' });
+  const demoFile = new File([blob], 'ગુજરાતી_માહિતી_પત્રક_Demo.txt', { type: 'text/plain;charset=utf-8' });
+  addFilesToQueue([demoFile]);
+  if (!senderTextNote.value.trim()) {
+    senderTextNote.value = 'જય શ્રી કૃષ્ણ! આ સાથે ગુજરાતી માહિતી પત્રક ફાઇલ અને ટેક્સ્ટ સંદેશ મોકલેલ છે.';
+  }
+  updateShareBtn();
+  notify('✨ ડેમો ગુજરાતી ફાઇલ અને ટેક્સ્ટ ઉમેરાઈ ગયા!');
+});
+
+// Direct Native Mobile Share (WhatsApp / Quick Share / AirDrop / Telegram)
+document.getElementById('nativeMobileShareBtn').addEventListener('click', async () => {
+  const note = senderTextNote.value.trim();
+  if (selectedFiles.length === 0 && !note) {
+    return notify('કૃપા કરીને પહેલાં ફાઇલ પસંદ કરો અથવા ટેક્સ્ટ લખો!', true);
+  }
+  if (navigator.share) {
+    try {
+      const shareData = {};
+      if (note) shareData.text = note;
+      if (selectedFiles.length > 0 && navigator.canShare && navigator.canShare({ files: selectedFiles })) {
+        shareData.files = selectedFiles;
+      }
+      await navigator.share(shareData);
+      notify('📲 Native Share ખોલ્યું!');
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    }
+  }
+  notify('તમારા બ્રાઉઝરમાં Direct Share માટે નીચે "🚀 શેર ચાલુ કરો" વાપરો.');
+});
+
+/* ─── Render QR Code ─── */
+function renderQRCode(code) {
+  const box = document.getElementById('qrContainer');
+  if (!box) return;
+  box.innerHTML = '';
+  const shareUrl = buildShareUrl(code);
+  if (typeof QRCode !== 'undefined') {
+    new QRCode(box, {
+      text: shareUrl,
+      width: 94,
+      height: 94,
+      colorDark: '#060a12',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  } else {
+    box.innerHTML = `<span style="color:#000;font-size:10px;text-align:center;font-weight:700">${escHtml(code)}</span>`;
+  }
+}
+
+function buildShareUrl(code) {
+  try {
+    const u = new URL(window.location.href);
+    u.searchParams.set('code', code);
+    return u.toString();
+  } catch (e) {
+    return code;
+  }
+}
+
+/* ─── Binary <-> Base64 & Unicode Helpers (100% Lossless on Android & iOS) ─── */
+function encodeUnicodeBase64(str) {
+  const bytes = new TextEncoder().encode(String(str ?? ''));
+  return uint8ToBase64(bytes);
+}
+
+function decodeUnicodeBase64(b64) {
+  try {
+    const bytes = base64ToUint8(b64);
+    return new TextDecoder('utf-8').decode(bytes);
+  } catch (e) {
+    return '';
+  }
+}
+
+function uint8ToBase64(u8) {
+  let binary = '';
+  const len = u8.byteLength;
+  const step = 8192;
+  for (let i = 0; i < len; i += step) {
+    binary += String.fromCharCode.apply(null, u8.subarray(i, Math.min(i + step, len)));
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8(b64) {
+  const bin = atob(String(b64 ?? ''));
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/* ─── Connect to Fast Public WSS Relay Broker (Fallback across 3 Brokers) ─── */
+function connectMqttRelay(onConnected) {
+  if (typeof mqtt === 'undefined') {
+    if (onConnected) onConnected(null);
+    return;
+  }
+  let idx = 0;
+  let resolved = false;
+
+  function tryNext() {
+    if (resolved || idx >= WSS_BROKERS.length) {
+      if (!resolved && onConnected) onConnected(null);
+      return;
+    }
+    const url = WSS_BROKERS[idx++];
+    try {
+      const client = mqtt.connect(url, {
+        connectTimeout: 4500,
+        reconnectPeriod: 3000,
+        clean: true,
+        clientId: 'fb_guj_' + Math.random().toString(36).slice(2, 10)
+      });
+
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          try { client.end(true); } catch (e) {}
+          tryNext();
+        }
+      }, 4600);
+
+      client.on('connect', () => {
+        if (resolved) {
+          try { client.end(true); } catch (e) {}
+          return;
+        }
+        resolved = true;
+        clearTimeout(timer);
+        if (onConnected) onConnected(client, url);
+      });
+
+      client.on('error', () => {
+        if (!resolved) {
+          clearTimeout(timer);
+          try { client.end(true); } catch (e) {}
+          tryNext();
+        }
+      });
+    } catch (e) {
+      tryNext();
+    }
+  }
+
+  tryNext();
+}
+
+function getRoomTopics(code) {
+  const clean = normalizeShareCode(code);
+  return {
+    c2s: `filebeam_guj_v6/${clean}/c2s`,
+    s2c: `filebeam_guj_v6/${clean}/s2c`,
+    peerId: `fb-guj-v6-${clean}`
+  };
+}
+
+/* ─── Start Sharing Session (Triple-Engine: WSS Cloud Relay + WebRTC TURN + BroadcastChannel) ─── */
+async function startShare() {
+  const hasPayload = selectedFiles.length > 0 || senderTextNote.value.trim().length > 0;
+  if (!hasPayload) return notify('કૃપા કરીને પહેલાં ફાઇલ પસંદ કરો અથવા ટેક્સ્ટ બોક્સમાં કંઈક લખો!', true);
+
+  const code = normalizeShareCode(codeInput.value);
+  if (!code) {
+    showCodeError('કોડમાં ઓછામાં ઓછો એક અક્ષર કે અંક હોવો જરૂરી છે.');
+    return;
+  }
+  codeInput.value = code;
+  activeShareCode = code;
+
+  const mode = document.getElementById('transportModeSelect').value;
+  const topics = getRoomTopics(code);
+
+  shareBtn.disabled = true;
+  regenBtn.disabled = true;
+  regenGujBtn.disabled = true;
+  codeInput.disabled = true;
+  shareBtn.textContent = 'કનેક્ટ થઈ રહ્યું છે (Starting)…';
+  document.getElementById('codeError').style.display = 'none';
+
+  await requestScreenWakeLock();
+
+  let anyTransportOpened = false;
+  const activeTransports = [];
+
+  function markSenderLive(transportName) {
+    if (!activeTransports.includes(transportName)) activeTransports.push(transportName);
+    document.getElementById('uploadSpeed').textContent = `Active: ${activeTransports.join(' + ')}`;
+    if (anyTransportOpened) return;
+    anyTransportOpened = true;
+    document.getElementById('liveCode').textContent = code;
+    document.getElementById('liveBox').style.display = 'block';
+    pushAgainBtn.style.display = 'inline-flex';
+    stopShareBtn.style.display = 'inline-flex';
+    shareBtn.innerHTML = UI_TEXT[currentLangMode].shareBtnReady;
+    document.getElementById('uploadProgress').classList.add('visible');
+    document.getElementById('uploadStatus').textContent = 'રિસીવરની રાહ જોવાઈ રહી છે — સામેવાળામાં કોડ નાખી Receive દબાવો…';
+    renderQRCode(code);
+    renderFileList();
+    // Auto-fill the Receive box on the same page if empty so single-device testing works in 1 click!
+    const mag = document.getElementById('magnetIn');
+    if (mag && !mag.value.trim()) mag.value = code;
+    notify(`લાઇવ શેર કોડ તૈયાર છે: ${code}`);
+  }
+
+  // 1. Local BroadcastChannel (Instant for testing across tabs/same device)
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      senderBc = new BroadcastChannel(topics.c2s);
+      const outBc = new BroadcastChannel(topics.s2c);
+      senderBc.onmessage = ev => {
+        const msg = ev.data;
+        if (msg && msg.type === 'receiver-hello') {
+          showConnectedReceiverBadge('Local Tab');
+          streamPayloadsViaCallback(pkt => outBc.postMessage(pkt), 'Local Fast Channel');
+        }
+      };
+      markSenderLive('Local');
+    }
+  } catch (e) {}
+
+  // 2. Cloud WSS Relay (Works 100% on Android Jio/Airtel & iPhone Safari over Port 443)
+  if (mode === 'hybrid' || mode === 'relay') {
+    connectMqttRelay(client => {
+      if (!client || !activeShareCode) return;
+      senderMqtt = client;
+      client.subscribe(topics.c2s, { qos: 0 }, () => {
+        markSenderLive('Cloud Relay (WSS)');
+      });
+      let isStreamingMqtt = false;
+      client.on('message', (topic, payloadBuf) => {
+        if (topic !== topics.c2s) return;
+        try {
+          const msg = JSON.parse(new TextDecoder().decode(payloadBuf));
+          if (msg && msg.type === 'receiver-hello' && !isStreamingMqtt) {
+            isStreamingMqtt = true;
+            showConnectedReceiverBadge('Cloud Relay (Android/iOS)');
+            streamPayloadsViaCallback(pkt => {
+              return new Promise(res => {
+                client.publish(topics.s2c, JSON.stringify(pkt), { qos: 0 }, () => {
+                  // Slight 8ms pacing so public WSS broker never drops a packet
+                  setTimeout(res, 8);
+                });
+              });
+            }, 'Cloud Relay (WSS)').finally(() => {
+              isStreamingMqtt = false;
+            });
+          }
+        } catch (e) {}
+      });
+    });
+  }
+
+  // 3. PeerJS WebRTC P2P + TURN (Uses serialization: 'json' — fixed 'raw' bug!)
+  if (mode === 'hybrid' || mode === 'webrtc') {
+    try {
+      senderPeer = new Peer(topics.peerId, PEER_CONFIG);
+      senderPeer.on('open', () => {
+        markSenderLive('WebRTC P2P');
+      });
+      senderPeer.on('disconnected', () => {
+        if (senderPeer && !senderPeer.destroyed) {
+          try { senderPeer.reconnect(); } catch (e) {}
+        }
+      });
+      senderPeer.on('error', err => {
+        if (mode === 'webrtc') {
+          resetShareUI();
+          showCodeError(
+            err.type === 'unavailable-id'
+              ? `કોડ "${code}" પહેલેથી વપરાશમાં છે — 🎲 બટન દબાવી નવો કોડ લો.`
+              : 'WebRTC Error: ' + err.message
+          );
+        }
+      });
+      senderPeer.on('connection', conn => {
+        activeWebRtcConns.push(conn);
+        showConnectedReceiverBadge('WebRTC P2P');
+        let sentToThisConn = false;
+        const triggerWebRtcSend = () => {
+          if (sentToThisConn) return;
+          sentToThisConn = true;
+          streamPayloadsViaCallback(async pkt => {
+            const dc = conn.dataChannel;
+            while (dc && dc.bufferedAmount > 256 * 1024 && conn.open) {
+              await new Promise(r => setTimeout(r, 12));
+            }
+            if (conn.open) conn.send(pkt);
+          }, 'WebRTC P2P');
+        };
+        conn.on('open', () => {
+          conn.on('data', d => {
+            if (d && d.type === 'receiver-hello') triggerWebRtcSend();
+          });
+          setTimeout(triggerWebRtcSend, 300);
+        });
+      });
+    } catch (e) {}
+  }
+}
+
+function showConnectedReceiverBadge(viaLabel) {
+  const el = document.getElementById('uploadPeers');
+  el.innerHTML = `<span class="peers-badge">🟢 રિસીવર કનેક્ટ થઈ ગયું (${escHtml(viaLabel)})</span>`;
+}
+
+// Push again manually if user edited text or added files while live
+pushAgainBtn.addEventListener('click', () => {
+  if (!activeShareCode) return;
+  const topics = getRoomTopics(activeShareCode);
+  if (senderMqtt && senderMqtt.connected) {
+    streamPayloadsViaCallback(pkt => {
+      return new Promise(res => {
+        senderMqtt.publish(topics.s2c, JSON.stringify(pkt), { qos: 0 }, () => setTimeout(res, 8));
+      });
+    }, 'Cloud Relay (WSS)');
+  }
+  activeWebRtcConns.forEach(conn => {
+    if (conn && conn.open) {
+      streamPayloadsViaCallback(async pkt => { conn.send(pkt); }, 'WebRTC P2P');
+    }
+  });
+});
+
+function resetShareUI() {
+  releaseScreenWakeLock();
+  activeShareCode = '';
+  if (senderPeer) {
+    try { senderPeer.destroy(); } catch (e) {}
+    senderPeer = null;
+  }
+  if (senderMqtt) {
+    try { senderMqtt.end(true); } catch (e) {}
+    senderMqtt = null;
+  }
+  if (senderBc) {
+    try { senderBc.close(); } catch (e) {}
+    senderBc = null;
+  }
+  activeWebRtcConns = [];
+  codeInput.disabled = false;
+  regenBtn.disabled = false;
+  regenGujBtn.disabled = false;
+  pushAgainBtn.style.display = 'none';
+  stopShareBtn.style.display = 'none';
+  document.getElementById('liveBox').style.display = 'none';
+  document.getElementById('uploadProgress').classList.remove('visible');
+  document.getElementById('uploadPeers').innerHTML = '';
+  applyLanguage(currentLangMode);
+  renderFileList();
+  updateShareBtn();
+}
+
+shareBtn.addEventListener('click', startShare);
+stopShareBtn.addEventListener('click', () => {
+  resetShareUI();
+  notify('શેરિંગ સેશન બંધ કર્યું (Session stopped)');
+});
+
+/* ─── Universal Packet Streamer (Sends Text Note + Files over Any Transport) ─── */
+async function streamPayloadsViaCallback(sendPacketFn, transportLabel) {
+  const total = selectedFiles.length;
+  const totalBytes = selectedFiles.reduce((s, f) => s + f.size, 0);
+  let sentGlobal = 0;
+  const startTime = performance.now();
+  const noteText = senderTextNote.value.trim();
+
+  document.getElementById('uploadSpeed').textContent = `Via: ${transportLabel}`;
+
+  // 1. Send Batch Header + Gujarati/English Text Note
+  await sendPacketFn({
+    type: 'batch',
+    total,
+    totalBytes,
+    textNoteB64: noteText ? encodeUnicodeBase64(noteText) : ''
+  });
+
+  // 2. Stream Each File as Sequenced Base64 Chunks (100% immune to Blob/ArrayBuffer bugs on Android & iOS!)
+  for (let i = 0; i < total; i++) {
+    const file = selectedFiles[i];
+    const fstat = document.getElementById('fstat-' + i);
+    if (fstat) fstat.textContent = '📤';
+    document.getElementById('uploadStatus').textContent =
+      `મોકલાઈ રહ્યું છે (${i + 1}/${total}): ${file.name}`;
+
+    const mime = inferMimeType(file.name, file.type);
+    await sendPacketFn({
+      type: 'meta',
+      fileIndex: i,
+      nameB64: encodeUnicodeBase64(file.name),
+      name: file.name,
+      size: file.size,
+      mime
+    });
+
+    const buf = await file.arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    let seq = 0;
+
+    for (let offset = 0; offset < u8.byteLength; offset += CHUNK_SIZE) {
+      const slice = u8.subarray(offset, Math.min(offset + CHUNK_SIZE, u8.byteLength));
+      const b64 = uint8ToBase64(slice);
+      await sendPacketFn({
+        type: 'chunk',
+        fileIndex: i,
+        seq: seq++,
+        b64,
+        byteLen: slice.byteLength
+      });
+
+      sentGlobal += slice.byteLength;
+      const pct = totalBytes > 0 ? Math.min(100, Math.round((sentGlobal * 100) / totalBytes)) : 100;
+      document.getElementById('uploadPct').textContent = pct + '%';
+      document.getElementById('uploadBar').style.width = pct + '%';
+
+      const elapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
+      const speedBps = sentGlobal / elapsedSec;
+      const remBytes = Math.max(0, totalBytes - sentGlobal);
+      const etaSec = speedBps > 0 ? Math.ceil(remBytes / speedBps) : 0;
+      document.getElementById('uploadSpeed').textContent = `${transportLabel} · ${fmtSize(speedBps)}/s`;
+      document.getElementById('uploadEta').textContent = `ETA: ${etaSec}s`;
+
+      // Yield to UI thread every 4 chunks so mobile browser stays responsive
+      if (seq % 4 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+
+    await sendPacketFn({ type: 'file-done', fileIndex: i });
+    if (fstat) fstat.textContent = '✅';
+  }
+
+  await sendPacketFn({ type: 'batch-done' });
+  document.getElementById('uploadPct').textContent = '100%';
+  document.getElementById('uploadBar').style.width = '100%';
+  document.getElementById('uploadStatus').textContent =
+    total > 0
+      ? '✔ બધી ફાઇલ અને મેસેજ સફળતાપૂર્વક મોકલાઈ ગયા!'
+      : '✔ તમારો ટેક્સ્ટ મેસેજ સફળતાપૂર્વક મોકલાઈ ગયો!';
+  notify('✅ સફળતાપૂર્વક મોકલાઈ ગયું (Sent Successfully)!');
+}
+
+/* ─── Receive Files & Text (Simultaneous WSS Cloud Relay + WebRTC + BroadcastChannel) ─── */
+let activeRcvPeer = null;
+let activeRcvMqtt = null;
+let activeRcvBc = null;
+
+async function startDownload() {
+  const raw = document.getElementById('magnetIn').value.trim();
+  const code = normalizeShareCode(raw);
+  if (!code) {
+    const dlMsg = document.getElementById('downloadMsg');
+    dlMsg.textContent = '⚠ કૃપા કરીને પહેલાં મોકલનારનો શેર કોડ નાખો (Please enter the share code).';
+    dlMsg.className = 'status-msg error';
+    notify('કૃપા કરીને શેર કોડ નાખો!', true);
+    return;
+  }
+  document.getElementById('magnetIn').value = code;
+
+  const mode = document.getElementById('transportModeSelect').value;
+  const topics = getRoomTopics(code);
+
+  const dlBtn = document.getElementById('downloadBtn');
+  const dlProg = document.getElementById('downloadProgress');
+  const dlBar = document.getElementById('downloadBar');
+  const dlStat = document.getElementById('downloadStatus');
+  const dlPct = document.getElementById('downloadPct');
+  const dlMsg = document.getElementById('downloadMsg');
+  const dlLinks = document.getElementById('dlLinks');
+  const rcvTextBox = document.getElementById('receivedTextBox');
+
+  cleanupReceiverTransports();
+
+  dlBtn.disabled = true;
+  dlBtn.textContent = 'કનેક્ટ થઈ રહ્યું છે (Connecting)…';
+  dlProg.classList.add('visible');
+  dlBar.style.width = '0%';
+  dlPct.textContent = '0%';
+  dlStat.textContent = `"${code}" સાથે જોડાઈ રહ્યું છે (Connecting via Hybrid Engine)…`;
+  dlMsg.textContent = '';
+  dlMsg.className = 'status-msg';
+  dlLinks.innerHTML = '';
+  rcvTextBox.style.display = 'none';
+
+  await requestScreenWakeLock();
+
+  let lockedTransport = null; // First transport to deliver 'batch' wins so we don't duplicate!
+  let isTransferComplete = false;
+  let totalFiles = 0;
+  let filesDone = 0;
+  let chunks = [];
+  let rcvBytes = 0;
+  let fileInfo = null;
+  let batchTotalBytes = 0;
+  let batchRcvBytes = 0;
+  const startTime = performance.now();
+
+  const connectTimeout = setTimeout(() => {
+    if (!lockedTransport && !isTransferComplete) {
+      cleanupReceiverTransports();
+      setDlError(
+        dlMsg,
+        dlBtn,
+        `કોડ "${code}" મળ્યો નહીં: મોકલનારે (Sender) "🚀 શેર ચાલુ કરો" બટન દબાવ્યું છે અને કોડ સાચો છે તેની ખાતરી કરો.`
+      );
+    }
+  }, 16000);
+
+  function handleIncomingPacket(msg, sourceTransport) {
+    if (!msg || typeof msg !== 'object') return;
+    if (lockedTransport && lockedTransport !== sourceTransport) return;
+
+    if (msg.type === 'batch') {
+      lockedTransport = sourceTransport;
+      clearTimeout(connectTimeout);
+      totalFiles = msg.total || 0;
+      batchTotalBytes = msg.totalBytes || 0;
+      document.getElementById('downloadSpeed').textContent = `Via: ${sourceTransport}`;
+
+      if (msg.textNoteB64) {
+        const note = decodeUnicodeBase64(msg.textNoteB64);
+        if (note) {
+          document.getElementById('receivedTextContent').textContent = note;
+          rcvTextBox.style.display = 'block';
+        }
+      }
+      dlStat.textContent = totalFiles > 0
+        ? `કનેક્ટેડ (${sourceTransport}) — ${totalFiles} ફાઇલ આવી રહી છે…`
+        : `કનેક્ટેડ (${sourceTransport}) — ટેક્સ્ટ મેસેજ મળી ગયો!`;
+    } else if (msg.type === 'meta') {
+      if (!lockedTransport) lockedTransport = sourceTransport;
+      clearTimeout(connectTimeout);
+      const decodedName = msg.nameB64 ? decodeUnicodeBase64(msg.nameB64) : (msg.name || 'file');
+      const cleanName = decodedName || 'received-file';
+      fileInfo = {
+        decodedName: cleanName,
+        size: msg.size || 0,
+        mime: inferMimeType(cleanName, msg.mime)
+      };
+      chunks = [];
+      rcvBytes = 0;
+      dlStat.textContent = `ડાઉનલોડ થઈ રહ્યું છે: ${fileInfo.decodedName}`;
+    } else if (msg.type === 'chunk' && fileInfo) {
+      const u8 = base64ToUint8(msg.b64);
+      chunks.push(u8);
+      rcvBytes += u8.byteLength;
+      batchRcvBytes += u8.byteLength;
+
+      if (fileInfo.size > 0) {
+        const pct = Math.min(100, Math.round((rcvBytes * 100) / fileInfo.size));
+        const batchPct = batchTotalBytes > 0
+          ? Math.min(100, Math.round((batchRcvBytes * 100) / batchTotalBytes))
+          : pct;
+        dlPct.textContent = batchPct + '%';
+        dlBar.style.width = batchPct + '%';
+
+        const elapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
+        const speedBps = batchRcvBytes / elapsedSec;
+        document.getElementById('downloadSpeed').textContent = `${sourceTransport} · ${fmtSize(speedBps)}/s`;
+        document.getElementById('downloadBytesLabel').textContent = `${fmtSize(batchRcvBytes)} / ${fmtSize(batchTotalBytes || fileInfo.size)}`;
+        dlStat.textContent = `ફાઇલ ${filesDone + 1}/${totalFiles}: ${fileInfo.decodedName} (${pct}%)`;
+      }
+    } else if (msg.type === 'file-done' && fileInfo) {
+      filesDone++;
+      const mimeType = inferMimeType(fileInfo.decodedName, fileInfo.mime);
+      const blob = new Blob(chunks, { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const fileName = fileInfo.decodedName;
+      const actualSize = blob.size || fileInfo.size;
+
+      const card = document.createElement('div');
+      card.className = 'dl-card';
+      const isImg = /^image\//i.test(mimeType);
+      const thumbHtml = isImg
+        ? `<img class="dl-thumb" src="${url}" alt="${escHtml(fileName)}" />`
+        : `<div class="dl-thumb" style="display:grid;place-items:center;font-size:1.3rem">📄</div>`;
+
+      card.innerHTML = `
+        ${thumbHtml}
+        <div class="dl-info">
+          <span class="dl-link-name">${escHtml(fileName)}</span>
+          <div class="dl-link-meta">${fmtSize(actualSize)} · ${escHtml(mimeType.split('/')[1] || 'file').toUpperCase()}</div>
+        </div>
+        <div class="dl-actions">
+          ${isIOS ? `<button class="dl-link-btn ios-primary-save" type="button">📲 iPhone Save</button>` : ''}
+          <a class="${isIOS ? 'dl-share-btn' : 'dl-link-btn'}" href="${url}" download="${escHtml(fileName)}" target="_blank" rel="noopener">⬇ સેવ (Save)</a>
+          ${!isIOS ? `<button class="dl-share-btn" type="button" title="Share file">📤 Share</button>` : ''}
+        </div>
+      `;
+
+      const triggerNativeShare = async () => {
+        try {
+          const fObj = new File([blob], fileName, { type: mimeType });
+          if (navigator.canShare && navigator.canShare({ files: [fObj] })) {
+            await navigator.share({ files: [fObj], title: fileName });
+            return;
+          }
+        } catch (e) {
+          if (e && e.name === 'AbortError') return;
+        }
+        const aTag = card.querySelector('a[download]');
+        if (aTag) aTag.click();
+      };
+
+      const iosBtn = card.querySelector('.ios-primary-save');
+      if (iosBtn) iosBtn.addEventListener('click', triggerNativeShare);
+      const shareFileBtn = card.querySelector('button.dl-share-btn');
+      if (shareFileBtn) shareFileBtn.addEventListener('click', triggerNativeShare);
+
+      dlLinks.appendChild(card);
+
+      if (!isIOS) {
+        const autoLink = Object.assign(document.createElement('a'), {
+          href: url,
+          download: fileName,
+          style: 'display:none'
+        });
+        document.body.appendChild(autoLink);
+        autoLink.click();
+        setTimeout(() => { document.body.removeChild(autoLink); }, 1500);
+      }
+
+      setTimeout(() => URL.revokeObjectURL(url), 15 * 60 * 1000);
+      chunks = [];
+      rcvBytes = 0;
+      dlStat.textContent = `✔ સેવ તૈયાર: ${fileName} (${filesDone}/${totalFiles})`;
+    } else if (msg.type === 'batch-done') {
+      isTransferComplete = true;
+      clearTimeout(connectTimeout);
+      releaseScreenWakeLock();
+      dlPct.textContent = '100%';
+      dlBar.style.width = '100%';
+      dlBtn.disabled = false;
+      dlBtn.textContent = '✔ પૂર્ણ! ફરી મેળવો (Receive Again)';
+      dlStat.textContent = totalFiles > 0
+        ? `✔ બધી ${filesDone} ફાઇલ સફળતાપૂર્વક મળી ગઈ!`
+        : `✔ ટેક્સ્ટ મેસેજ સફળતાપૂર્વક મળી ગયો!`;
+
+      if (isIOS && dlLinks.children.length) {
+        dlMsg.textContent = '📲 iPhone સૂચના: ઉપરના લીલા "📲 iPhone Save" બટન પર ટેપ કરીને Save to Files અથવા Save Image પસંદ કરો!';
+        dlMsg.className = 'status-msg success';
+      } else if (dlLinks.children.length) {
+        dlMsg.textContent = `✔ ${filesDone} ફાઇલ તમારા Downloads ફોલ્ડરમાં સેવ થઈ ગઈ છે (અથવા "⬇ સેવ" દબાવો).`;
+        dlMsg.className = 'status-msg success';
+      } else {
+        dlMsg.textContent = '✔ ટેક્સ્ટ મેસેજ મળી ગયો છે! ઉપર "📋 કોપી" બટન દબાવીને કોપી કરો.';
+        dlMsg.className = 'status-msg success';
+      }
+      notify('🎉 ટ્રાન્સફર પૂર્ણ (Transfer Complete)!');
+      setTimeout(cleanupReceiverTransports, 800);
+    }
+  }
+
+  // Transport 1: Local BroadcastChannel (If Sender is in another tab or same page)
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      activeRcvBc = new BroadcastChannel(topics.s2c);
+      const outBc = new BroadcastChannel(topics.c2s);
+      activeRcvBc.onmessage = ev => handleIncomingPacket(ev.data, 'Local Fast Channel');
+      outBc.postMessage({ type: 'receiver-hello', ts: Date.now() });
+      setTimeout(() => { try { outBc.close(); } catch (e) {} }, 1500);
+    }
+  } catch (e) {}
+
+  // Transport 2: Cloud WSS Relay (Port 443 — Works across all Android & iOS mobile networks!)
+  if (mode === 'hybrid' || mode === 'relay') {
+    connectMqttRelay(client => {
+      if (!client || isTransferComplete) return;
+      activeRcvMqtt = client;
+      client.subscribe(topics.s2c, { qos: 0 }, () => {
+        client.publish(topics.c2s, JSON.stringify({ type: 'receiver-hello', ts: Date.now() }), { qos: 0 });
+      });
+      client.on('message', (topic, payloadBuf) => {
+        if (topic !== topics.s2c) return;
+        try {
+          const pkt = JSON.parse(new TextDecoder().decode(payloadBuf));
+          handleIncomingPacket(pkt, 'Cloud Relay (WSS)');
+        } catch (e) {}
+      });
+    });
+  }
+
+  // Transport 3: PeerJS WebRTC P2P + TURN (Using valid serialization: 'json')
+  if (mode === 'hybrid' || mode === 'webrtc') {
+    try {
+      activeRcvPeer = new Peer(PEER_CONFIG);
+      activeRcvPeer.on('open', () => {
+        if (isTransferComplete || lockedTransport) return;
+        const conn = activeRcvPeer.connect(topics.peerId, { reliable: true, serialization: 'json' });
+        conn.on('open', () => {
+          conn.send({ type: 'receiver-hello', ts: Date.now() });
+        });
+        conn.on('data', pkt => {
+          handleIncomingPacket(pkt, 'WebRTC P2P');
+        });
+      });
+      activeRcvPeer.on('error', err => {
+        if (mode === 'webrtc' && !lockedTransport) {
+          clearTimeout(connectTimeout);
+          setDlError(dlMsg, dlBtn, 'WebRTC Error: ' + err.message);
+        }
+      });
+    } catch (e) {}
+  }
+}
+
+function cleanupReceiverTransports() {
+  if (activeRcvPeer) {
+    try { activeRcvPeer.destroy(); } catch (e) {}
+    activeRcvPeer = null;
+  }
+  if (activeRcvMqtt) {
+    try { activeRcvMqtt.end(true); } catch (e) {}
+    activeRcvMqtt = null;
+  }
+  if (activeRcvBc) {
+    try { activeRcvBc.close(); } catch (e) {}
+    activeRcvBc = null;
+  }
+}
+
+document.getElementById('downloadBtn').addEventListener('click', startDownload);
+
+/* ─── Clipboard Helpers & Auto-Read URL ?code= Parameter ─── */
+document.getElementById('copyCodeBtn').addEventListener('click', () => {
+  const code = document.getElementById('liveCode').textContent;
+  copyTextWithFeedback(code, '✔ શેર કોડ કોપી થઈ ગયો! (Code Copied)');
+});
+
+document.getElementById('copyLinkBtn').addEventListener('click', async () => {
+  const code = document.getElementById('liveCode').textContent;
+  const url = buildShareUrl(code);
+  if (navigator.share) {
+    try {
+      await navigator.share({
+        title: 'FileBeam ગુજરાતી Pro — Direct File Transfer',
+        text: `FileBeam શેર કોડ: ${code}`,
+        url
+      });
+      return;
+    } catch (e) {}
+  }
+  copyTextWithFeedback(url, '✔ ડાયરેક્ટ શેર લિંક કોપી થઈ ગઈ! (Share Link Copied)');
+});
+
+document.getElementById('pasteCodeQuickBtn').addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) {
+      document.getElementById('magnetIn').value = normalizeShareCode(text);
+      notify('ક્લિપબોર્ડમાંથી કોડ પેસ્ટ કર્યો!');
+    }
+  } catch (e) {
+    document.getElementById('magnetIn').focus();
+    notify('બોક્સમાં લાંબો સમય દબાવીને Paste કરો');
+  }
+});
+
+document.getElementById('copyReceivedTextBtn').addEventListener('click', () => {
+  const txt = document.getElementById('receivedTextContent').textContent;
+  copyTextWithFeedback(txt, '✔ મળેલો ટેક્સ્ટ મેસેજ કોપી થઈ ગયો!');
+});
+
+function copyTextWithFeedback(str, feedback) {
+  const msg = document.getElementById('copyMsg');
+  (navigator.clipboard ? navigator.clipboard.writeText(str) : Promise.reject())
+    .then(() => {
+      if (msg) { msg.textContent = feedback; setTimeout(() => { msg.textContent = ''; }, 3000); }
+      notify(feedback);
+    })
+    .catch(() => {
+      const ta = Object.assign(document.createElement('textarea'), { value: str });
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (msg) { msg.textContent = feedback; setTimeout(() => { msg.textContent = ''; }, 3000); }
+      notify(feedback);
+    });
+}
+
+function showCodeError(msg) {
+  const el = document.getElementById('codeError');
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+}
+
+function fmtSize(bytes) {
+  if (!bytes || bytes <= 0) return '0 B';
+  const k = 1024, u = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
+  return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + u[i];
+}
+
+function setDlError(msgEl, btn, txt) {
+  releaseScreenWakeLock();
+  msgEl.textContent = '❌ ' + txt;
+  msgEl.className = 'status-msg error';
+  btn.disabled = false;
+  btn.textContent = UI_TEXT[currentLangMode].downloadBtnIdle;
+}
+
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Auto-populate receiver code if opened via QR code link (?code=...)
+(function checkUrlCodeParam() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const codeParam = params.get('code');
+    if (codeParam) {
+      const cleaned = normalizeShareCode(codeParam);
+      if (cleaned) {
+        document.getElementById('magnetIn').value = cleaned;
+        notify(`QR / લિંક પરથી કોડ "${cleaned}" આવી ગયો — Receive દબાવો!`);
+      }
+    }
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

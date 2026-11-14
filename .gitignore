@@ -1,0 +1,38 @@
+# Flutter and Dart
+.dart_tool/
+.packages
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Editors
+.idea/
+.vscode/
+*.iml
+
+# Environment and secrets
+.env
+.env.*
+*.jks
+*.keystore
+key.properties
+android/key.properties
+service-account*.json
+firebase-adminsdk*.json
+
+# Node.js dependencies
+node_modules/
+functions/node_modules/
+cloud_run/node_modules/
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+__pycache__/
+*.pyc

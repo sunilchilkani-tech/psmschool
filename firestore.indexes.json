@@ -1,0 +1,30 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "attendance_days",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "school_ref", "order": "ASCENDING" },
+        { "fieldPath": "attendance_date", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "students",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "school_ref", "order": "ASCENDING" },
+        { "fieldPath": "class_id", "order": "ASCENDING" },
+        { "fieldPath": "is_active", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "student_attendance",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "attendance_day_id", "order": "ASCENDING" },
+        { "fieldPath": "student_id", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

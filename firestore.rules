@@ -1,0 +1,231 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Platform developer configuration & broadcast messages
+    match /platform_config/{docId} {
+      allow read, write: if true;
+    }
+
+    match /developer_messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // Developer File Share is available before a school user signs in.
+    // The application validates the Developer key before these operations.
+    match /developer_shared_files/{fileId} {
+      allow read, write: if true;
+    }
+
+    match /developer_message_dismissals/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_validity_reminder_dismissals/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Schools and Teacher directory (readable pre-login for DISE lookup & user picker;
+    // writable during Developer school provisioning and Admin teacher management)
+    match /schools/{schoolId} {
+      allow read, write: if true;
+      match /{allSubcollections=**} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    match /school_teachers/{teacherId} {
+      allow read, write: if true;
+    }
+
+    match /school_subject_master/{docId} {
+      allow read, write: if true;
+    }
+
+    match /school_result_grade_settings/{docId} {
+      allow read, write: if true;
+    }
+
+    match /school_leave_settings/{docId} {
+      allow read, write: if true;
+    }
+
+    // School-scoped operational collections (readable for Developer Usage metrics;
+    // writes require authenticated Firebase session)
+    match /school_classes/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /students/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /student_private_details/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /attendance_days/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /student_attendance/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /attendance_admin_overrides/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_settings/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /school_holidays/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_admin_messages/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_custom_headers/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_report_settings/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_hajari_patrak_settings/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /hajari_student_present_day_overrides/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /class_subjects/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_subject_catalog/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /teacher_subject_assignments/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /class_result_settings/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /student_result_profiles/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /student_subject_marks/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /student_result_roster_snapshots/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /student_result_roster_members/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /teacher_leave_report_snapshots/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /teacher_leaves/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_teacher_valtar_rules/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /library_books/{docId} {
+      allow read, write: if true;
+    }
+
+    match /library_book_number_history/{docId} {
+      allow read, write: if true;
+    }
+
+    match /library_settings/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /library_transactions/{docId} {
+      allow read, write: if true;
+    }
+
+    match /library_developer_bulk_delete_audit/{docId} {
+      allow read, write: if true;
+    }
+
+    match /school_rojmel_state/{docId} {
+      allow read, write: if isSignedIn();
+      match /chunks/{chunkId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    match /school_assets/{docId} {
+      allow read: if true;
+      // Developer shared files use IDs beginning with dev_shared__ and are
+      // uploaded from the pre-login Developer screen.
+      allow write: if isSignedIn() || docId.matches('dev_shared__.*');
+    }
+
+    match /file_beam_rooms/{roomId} {
+      allow read, write: if true;
+      match /chunks/{chunkId} {
+        allow read, write: if true;
+      }
+    }
+
+    match /school_shared_files/{fileId} {
+      allow read, write: if isSignedIn();
+      match /chunks/{chunkId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    // New-school registration requests from the login screen. Anyone may
+    // create one pending request per DISE number (document id); only the
+    // developer console may read, edit, approve or reject them.
+    match /school_registration_requests/{diseNo} {
+      allow create: if request.resource.data.status == 'pending'
+        && request.resource.data.dise_number == diseNo
+        && diseNo.matches('^[0-9]{4,20}$')
+        && request.resource.data.keys().hasOnly(['school_name_en', 'school_name_gu', 'school_address_en',
+             'school_address_gu', 'dise_number', 'admin_name', 'admin_mobile', 'admin_password',
+             'school_type', 'note', 'status', 'source', 'created_at'])
+        && request.resource.data.school_name_en is string && request.resource.data.school_name_en.size() <= 200
+        && request.resource.data.admin_name is string && request.resource.data.admin_name.size() <= 100
+        && request.resource.data.admin_password is string && request.resource.data.admin_password.size() <= 15
+        && request.resource.data.note is string && request.resource.data.note.size() <= 500;
+      allow read, update, delete: if isSignedIn()
+        && request.auth.token.email == 'dev_console_service@psm-login.invalid';
+    }
+
+    match /password_reset_otps/{docId} {
+      allow read, write: if false;
+    }
+  }
+}
