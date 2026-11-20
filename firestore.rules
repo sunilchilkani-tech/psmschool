@@ -22,11 +22,11 @@ service cloud.firestore {
     }
 
     match /developer_message_dismissals/{docId} {
-      allow read, write: if isSignedIn();
+      allow read, write: if true;
     }
 
     match /school_validity_reminder_dismissals/{docId} {
-      allow read, write: if isSignedIn();
+      allow read, write: if true;
     }
 
     // Schools and Teacher directory (readable pre-login for DISE lookup & user picker;
@@ -185,6 +185,11 @@ service cloud.firestore {
       }
     }
 
+    match /school_rojmel_fy_archives/{docId} {
+      allow read, create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
     match /school_assets/{docId} {
       allow read: if true;
       // Developer shared files use IDs beginning with dev_shared__ and are
@@ -220,8 +225,27 @@ service cloud.firestore {
         && request.resource.data.admin_name is string && request.resource.data.admin_name.size() <= 100
         && request.resource.data.admin_password is string && request.resource.data.admin_password.size() <= 15
         && request.resource.data.note is string && request.resource.data.note.size() <= 500;
-      allow read, update, delete: if isSignedIn()
-        && request.auth.token.email == 'dev_console_service@psm-login.invalid';
+      allow read, update, delete: if isSignedIn();
+    }
+
+    match /student_absence_alert_acks/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_academic_events/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_weekly_meal_menus/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_meal_menu_dismissals/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /school_promotion_archives/{docId} {
+      allow read, write: if isSignedIn();
     }
 
     match /password_reset_otps/{docId} {

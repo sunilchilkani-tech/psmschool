@@ -1519,7 +1519,7 @@ class _AdminWorkflowPanelState extends State<AdminWorkflowPanel> {
             // requireAdmin() check is authoritative. Do not duplicate the
             // role check against a client-side response shape.
             : DefaultTabController(
-                length: 3,
+                length: 4,
                 child: Column(
                   children: [
                     const Material(
@@ -1538,6 +1538,10 @@ class _AdminWorkflowPanelState extends State<AdminWorkflowPanel> {
                             icon: Icon(Icons.menu_book_outlined),
                             text: 'Subjects',
                           ),
+                          Tab(
+                            icon: Icon(Icons.verified_user_outlined),
+                            text: 'Attendance Permission / હાજરી પરવાનગી',
+                          ),
                         ],
                       ),
                     ),
@@ -1545,11 +1549,17 @@ class _AdminWorkflowPanelState extends State<AdminWorkflowPanel> {
                     if (_busy) const LinearProgressIndicator(),
                     Expanded(
                       child: TabBarView(
-            physics: const NeverScrollableScrollPhysics(),
+                        physics: const NeverScrollableScrollPhysics(),
                         children: [
                           _classesView(),
                           _teachersView(),
                           _subjectsView(),
+                          ListView(
+                            padding: const EdgeInsets.all(16),
+                            children: const [
+                              SupabaseAttendancePermissionControlCard(),
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -1639,6 +1649,22 @@ class _AdminWorkflowPanelState extends State<AdminWorkflowPanel> {
                     },
               icon: const Icon(Icons.trending_up),
               label: const Text('Class Promote / વર્ગ બઢતી'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: _busy
+                  ? null
+                  : () async {
+                      await Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) =>
+                              const SupabaseAttendancePermissionScreen(),
+                        ),
+                      );
+                    },
+              icon: const Icon(Icons.verified_user_outlined),
+              label: const Text(
+                'Attendance Permission / હાજરી પૂરવાની પરવાનગી (4 Modes)',
+              ),
             ),
             OutlinedButton.icon(
               onPressed: _busy

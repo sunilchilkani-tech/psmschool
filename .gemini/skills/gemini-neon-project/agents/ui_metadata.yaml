@@ -1,0 +1,4 @@
+interface:
+  display_name: "Gemini Neon School Project"
+  short_description: "Safe Neon backend work without changing existing school logic"
+  brand_color: "#00A86B"

@@ -158,12 +158,12 @@ class HajariPatrakXlsxTemplateExporter {
       final entry = AttendanceLifecycle.parseEnrollmentDate(student);
       final left = AttendanceLifecycle.parseLeavingDate(student);
       if (entry != null) {
-        // Recorded register: a student who joined during this month and has
-        // recorded attendance is shown too, so the daily totals are complete.
+        // Recorded register: include students who joined during this month so
+        // both the front-page admissions row and daily marks are complete.
         if (recorded != null &&
             entry.year == year &&
             entry.month == month &&
-            recorded.studentDailyMarks.containsKey(_text(student['id']))) {
+            (left == null || !left.isBefore(first))) {
           return true;
         }
         return AttendanceLifecycle.includeInMonthlyRegister(
@@ -1282,7 +1282,7 @@ class HajariPatrakXlsxTemplateExporter {
           (m) => '<alignment${align(m.group(1)!)}/>',
         );
       } else if (xf.endsWith('/>')) {
-        xf = '${xf.substring(0, xf.length - 2)} applyAlignment="1"><alignment${align('')}/></xf>';
+        xf = '${xf.substring(0, xf.length - 2)}><alignment${align('')}/></xf>';
       } else {
         xf = xf.replaceFirst('</xf>', '<alignment${align('')}/></xf>');
       }
@@ -1987,35 +1987,43 @@ class HajariPatrakXlsxTemplateExporter {
     final admissions = <Map<String, dynamic>>[];
     final departures = <Map<String, dynamic>>[];
     final continuous = <Map<String, dynamic>>[];
+    final lcExits = <Map<String, dynamic>>[];
     final closing = <Map<String, dynamic>>[];
     for (final student in students) {
-      final entry = _effectiveEntry(student);
-      final leaving = _parseDate(student['leaving_date']) ??
-          (student['is_active'] == false
-              ? _parseDate(student['updated_at'])
-              : null);
+      final rawEntry = _effectiveEntry(student);
+      // In June (start of the academic year), students admitted on or before June 1st
+      // belong to the opening register strength.
+      final entry = (first.month == 6 &&
+              rawEntry.year == first.year &&
+              rawEntry.month == 6 &&
+              rawEntry.day == 1)
+          ? DateTime(first.year, 5, 31)
+          : rawEntry;
+      final leaving = AttendanceLifecycle.parseLeavingDate(student);
       if (entry.isBefore(first) &&
-          (leaving == null || !leaving.isBefore(first))) opening.add(student);
-      if (!entry.isBefore(first) && !entry.isAfter(last))
+          (leaving == null || !leaving.isBefore(first))) {
+        opening.add(student);
+      }
+      if (!entry.isBefore(first) && !entry.isAfter(last)) {
         admissions.add(student);
-      if (leaving != null &&
+      }
+      if (!entry.isAfter(last) &&
+          leaving != null &&
           !leaving.isBefore(first) &&
           !leaving.isAfter(last)) {
         final reason = _leavingReason(student);
         departures.add(student);
-        if (_continuousAbsence(reason)) continuous.add(student);
+        if (_continuousAbsence(reason)) {
+          continuous.add(student);
+        } else {
+          lcExits.add(student);
+        }
       }
-      if (!entry.isAfter(last) && (leaving == null || leaving.isAfter(last)))
+      if (!entry.isAfter(last) && (leaving == null || leaving.isAfter(last))) {
         closing.add(student);
+      }
     }
-    final lcExits = departures
-        .where((student) => _isLeavingCertificate(_leavingReason(student)))
-        .toList();
-    final hasUnclassifiedDeparture = departures.any((student) {
-      final reason = _leavingReason(student);
-      return reason.isEmpty ||
-          (!_continuousAbsence(reason) && !_isLeavingCertificate(reason));
-    });
+    const hasUnclassifiedDeparture = false;
     Map<String, dynamic> summarize(
       List<Map<String, dynamic>> source, {
       bool reasonUnknown = false,
@@ -2094,8 +2102,7 @@ class HajariPatrakXlsxTemplateExporter {
   }
 
   DateTime _effectiveEntry(Map<String, dynamic> student) =>
-      _parseDate(student['enroll_school']) ??
-      _parseDate(student['created_at']) ??
+      AttendanceLifecycle.parseEnrollmentDate(student) ??
       DateTime(1900, 1, 1);
   String _dateDmy(dynamic value) {
     final v = _parseDate(value);
@@ -2163,38 +2170,11 @@ class HajariPatrakXlsxTemplateExporter {
         'GIRLS' => 'કન્યા',
         _ => '',
       };
-  String _leavingReason(Map<String, dynamic> student) {
-    final custom = _asMap(student['custom_fields']);
-    const keys = <String>{
-      'leavingreason',
-      'reasonforleaving',
-      'exitreason',
-      'archivereason',
-      'inactivereason',
-      'removalreason',
-      'reason',
-      'નામકમીકારણ',
-      'ગેરહાજરીનાકારણ',
-      'કારણ',
-    };
-    for (final entry in custom.entries) {
-      final key = '${entry.key}'.toLowerCase().replaceAll(
-            RegExp(r'[^a-z0-9઀-૿]'),
-            '',
-          );
-      if (keys.contains(key) && _text(entry.value).isNotEmpty)
-        return _text(entry.value);
-    }
-    return '';
-  }
+  String _leavingReason(Map<String, dynamic> student) =>
+      AttendanceLifecycle.parseExitReason(student);
 
-  bool _continuousAbsence(String reason) {
-    final text = reason.toLowerCase().replaceAll(RegExp(r'\s+'), '');
-    return (text.contains('continuous') && text.contains('absence')) ||
-        (text.contains('long') && text.contains('absence')) ||
-        (text.contains('સતત') && text.contains('ગેરહાજ')) ||
-        (text.contains('ગેરહાજરીથી') && text.contains('નામકમી'));
-  }
+  bool _continuousAbsence(String reason) =>
+      AttendanceLifecycle.isContinuousAbsenceReason(reason);
 
   bool _isLeavingCertificate(String reason) {
     final text = reason.toLowerCase().replaceAll(RegExp(r'\s+'), '');

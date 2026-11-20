@@ -490,6 +490,24 @@ class SupabaseResultApiService extends ApiService {
         return {'result': 'error', 'message': 'Semester must be 1 or 2.'};
       }
       final cls = await _classRow(className);
+      final isAdmin = await _isSchoolAdmin();
+      if (!isAdmin) {
+        final lockRow = await _client
+            .from('class_result_settings')
+            .select('sem1_locked,sem2_locked')
+            .eq('class_id', '${cls['id']}')
+            .maybeSingle();
+        final isSemLocked = semester == 1
+            ? (lockRow?['sem1_locked'] == true)
+            : (lockRow?['sem2_locked'] == true);
+        if (isSemLocked) {
+          return {
+            'result': 'error',
+            'message':
+                '\u{1F512} \u0A86 \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0A97\u0AC1\u0AA3, \u0AB5\u0ACD\u0AAF\u0A95\u0ACD\u0AA4\u0ABF\u0AA4\u0ACD\u0AB5 \u0AB5\u0ABF\u0A95\u0ABE\u0AB8 \u0A95\u0AC7 \u0AB8\u0ACD\u0AA8\u0AC7\u0AAA\u0AB6\u0ACB\u0A9F \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+          };
+        }
+      }
       final response =
           await _client.rpc('replace_student_result_roster_snapshot', params: {
         'p_class_id': '${cls['id']}',
@@ -1223,6 +1241,55 @@ class SupabaseResultApiService extends ApiService {
       final classId = '${cls['id']}';
       final year = await _academicYear(classId);
       final adminUser = await _isSchoolAdmin();
+      bool sem1Locked = false;
+      bool sem2Locked = false;
+      if (!adminUser &&
+          subject != '__STUDENT_PROFILES__' &&
+          subject != '__DELETE_STUDENT__') {
+        final lockRow = await _client
+            .from('class_result_settings')
+            .select('sem1_locked,sem2_locked')
+            .eq('class_id', classId)
+            .maybeSingle();
+        sem1Locked = lockRow?['sem1_locked'] == true;
+        sem2Locked = lockRow?['sem2_locked'] == true;
+        const vvSubject = '\u0AB5\u0ACD\u0AAF\u0A95\u0ACD\u0AA4\u0ABF\u0AA4\u0ACD\u0AB5 \u0AB5\u0ABF\u0A95\u0ABE\u0AB8';
+        if (subject == vvSubject) {
+          if (sem == '1' && sem1Locked) {
+            return {
+              'result': 'error',
+              'message':
+                  '\u{1F512} \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0ABE \u0A97\u0AC1\u0AA3 \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+            };
+          }
+          if (sem != '1' && sem2Locked) {
+            return {
+              'result': 'error',
+              'message':
+                  '\u{1F512} \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0ABE \u0A97\u0AC1\u0AA3 \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+            };
+          }
+        } else if (entryCombo == 'both_sem_all_6') {
+          if (sem2Locked) {
+            return {
+              'result': 'error',
+              'message':
+                  '\u{1F512} \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0ABE \u0A97\u0AC1\u0AA3 \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+            };
+          }
+        } else {
+          final targetSemCheck = sem == '1' ? 1 : 2;
+          if ((targetSemCheck == 1 && sem1Locked) ||
+              (targetSemCheck == 2 && sem2Locked)) {
+            return {
+              'result': 'error',
+              'message': targetSemCheck == 1
+                  ? '\u{1F512} \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0ABE \u0A97\u0AC1\u0AA3 \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.'
+                  : '\u{1F512} \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0ABE \u0A97\u0AC1\u0AA3 \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+            };
+          }
+        }
+      }
       if (subject == 'વ્યક્તિત્વ વિકાસ') {
         final teacherId = await _currentTeacherId();
         if (!adminUser &&
@@ -1451,16 +1518,20 @@ class SupabaseResultApiService extends ApiService {
               ? <String, dynamic>{}
               : Map<String, dynamic>.from(profileRaw);
           final useSem2 = sem != '1';
-          final vv1 = row.containsKey('vv1')
-              ? _int(row['vv1'])
-              : (useSem2 ? _int(old['vv1']) : _int(row['vv']));
+          final keepLockedSem1Vv = !adminUser && useSem2 && sem1Locked;
+          final vv1 = keepLockedSem1Vv
+              ? _int(old['vv1'])
+              : (row.containsKey('vv1')
+                  ? _int(row['vv1'])
+                  : (useSem2 ? _int(old['vv1']) : _int(row['vv'])));
           final vv2 = row.containsKey('vv2')
               ? _int(row['vv2'])
               : (useSem2 ? _int(row['vv']) : _int(old['vv2']));
           final sentenceMarks =
               row['sentences'] is List ? row['sentences'] : null;
-          final sentenceMarks1 =
-              row['sentences1'] is List ? row['sentences1'] : null;
+          final sentenceMarks1 = keepLockedSem1Vv
+              ? null
+              : (row['sentences1'] is List ? row['sentences1'] : null);
           await _client.from('student_result_profiles').upsert({
             'school_ref': schoolRef,
             'class_id': classId,
@@ -1493,6 +1564,7 @@ class SupabaseResultApiService extends ApiService {
         if (id == null) continue;
         if (bothSems) {
           for (final targetSem in [1, 2]) {
+            if (!adminUser && targetSem == 1 && sem1Locked) continue;
             if (targetSem == 2) {
               final p = await _client
                   .from('student_result_profiles')
@@ -1612,6 +1684,150 @@ class SupabaseResultApiService extends ApiService {
         .eq('class_id', classId)
         .maybeSingle();
     return '${settings?['academic_year'] ?? '2026 - 27'}';
+  }
+
+  /// Returns every active class in the school with its Sem 1 & Sem 2 lock status.
+  /// Uses cached school-scoped queries to keep Firebase reads minimal.
+  Future<List<Map<String, dynamic>>> getSchoolResultLockStatus() async {
+    final schoolRef = await _schoolRef();
+    final classRows = await _client
+        .from('school_classes')
+        .select()
+        .eq('school_ref', schoolRef);
+    final settingsRows = await _client
+        .from('class_result_settings')
+        .select('class_id,sem1_locked,sem2_locked,updated_at')
+        .eq('school_ref', schoolRef);
+
+    final settingsByClassId = <String, Map<String, dynamic>>{};
+    for (final raw in settingsRows) {
+      final row = Map<String, dynamic>.from(raw);
+      final cid = '${row['class_id'] ?? ''}'.trim();
+      if (cid.isNotEmpty) settingsByClassId[cid] = row;
+    }
+
+    final items = <Map<String, dynamic>>[];
+    for (final raw in classRows) {
+      final row = Map<String, dynamic>.from(raw);
+      if (row['is_active'] == false) continue;
+      final cid = '${row['id'] ?? ''}'.trim();
+      if (cid.isEmpty) continue;
+      final classKey =
+          '${row['class_key'] ?? row['key'] ?? row['class_name'] ?? ''}'.trim();
+      final rawLabel =
+          '${row['display_label'] ?? row['label'] ?? row['class_name'] ?? ''}'
+              .trim();
+      final displayLabel = rawLabel.isNotEmpty
+          ? rawLabel
+          : classKey.replaceAll('_', ' ');
+      final st = settingsByClassId[cid];
+      items.add(<String, dynamic>{
+        'classId': cid,
+        'classKey': classKey,
+        'displayLabel': displayLabel.isNotEmpty ? displayLabel : classKey,
+        'sortOrder': _int(row['sort_order']),
+        'sem1Locked': st?['sem1_locked'] == true,
+        'sem2Locked': st?['sem2_locked'] == true,
+        'updatedAt': '${st?['updated_at'] ?? ''}'.trim(),
+      });
+    }
+    items.sort((a, b) {
+      final bySort = _int(a['sortOrder']).compareTo(_int(b['sortOrder']));
+      if (bySort != 0) return bySort;
+      return '${a['displayLabel']}'.compareTo('${b['displayLabel']}');
+    });
+    return items;
+  }
+
+  /// Admin-only semester-wise Result Lock / Unlock.
+  /// - [classId] == null: applies to the whole school (skips unchanged classes to cut Firestore writes).
+  /// - [classId] != null: applies to that single class only (1 Firestore write).
+  Future<Map<String, dynamic>> setSchoolResultLock({
+    required int semester,
+    required bool isLocked,
+    String? classId,
+  }) async {
+    try {
+      if (!await _isSchoolAdmin()) {
+        return {
+          'result': 'error',
+          'message':
+              '\u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95/\u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AB5\u0ABE\u0AA8\u0ACB \u0A85\u0AA7\u0ABF\u0A95\u0ABE\u0AB0 \u0AAE\u0ABE\u0AA4\u0ACD\u0AB0 School Admin \u0AAA\u0ABE\u0AB8\u0AC7 \u0A9B\u0AC7.',
+        };
+      }
+      if (semester != 1 && semester != 2) {
+        return {'result': 'error', 'message': 'Semester must be 1 or 2.'};
+      }
+      final schoolRef = await _schoolRef();
+      final lockField = semester == 1 ? 'sem1_locked' : 'sem2_locked';
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+
+      final targetIds = <String>{};
+      final singleId = (classId ?? '').trim();
+      if (singleId.isNotEmpty) {
+        targetIds.add(singleId);
+      } else {
+        final classRows = await _client
+            .from('school_classes')
+            .select('id,is_active')
+            .eq('school_ref', schoolRef);
+        for (final raw in classRows) {
+          if (raw['is_active'] == false) continue;
+          final cid = '${raw['id'] ?? ''}'.trim();
+          if (cid.isNotEmpty) targetIds.add(cid);
+        }
+      }
+      if (targetIds.isEmpty) {
+        return {'result': 'error', 'message': 'No active classes found.'};
+      }
+
+      final existingByClassId = <String, Map<String, dynamic>>{};
+      if (singleId.isNotEmpty) {
+        final row = await _client
+            .from('class_result_settings')
+            .select()
+            .eq('class_id', singleId)
+            .maybeSingle();
+        if (row != null) existingByClassId[singleId] = Map<String, dynamic>.from(row);
+      } else {
+        final rows = await _client
+            .from('class_result_settings')
+            .select()
+            .eq('school_ref', schoolRef);
+        for (final raw in rows) {
+          final map = Map<String, dynamic>.from(raw);
+          final cid = '${map['class_id'] ?? ''}'.trim();
+          if (cid.isNotEmpty) existingByClassId[cid] = map;
+        }
+      }
+
+      var updatedCount = 0;
+      for (final cid in targetIds) {
+        final old = existingByClassId[cid] ?? <String, dynamic>{};
+        final already = old[lockField] == true;
+        if (already == isLocked && old.containsKey(lockField)) {
+          continue; // Skip unchanged classes to minimize Firestore write cost
+        }
+        await _client.from('class_result_settings').upsert(<String, dynamic>{
+          ...old,
+          'school_ref': schoolRef,
+          'class_id': cid,
+          lockField: isLocked,
+          'updated_at': nowIso,
+        }, onConflict: 'class_id,school_ref');
+        updatedCount++;
+      }
+
+      return {
+        'result': 'success',
+        'semester': semester,
+        'isLocked': isLocked,
+        'updatedCount': updatedCount,
+        'totalClasses': targetIds.length,
+      };
+    } catch (error) {
+      return {'result': 'error', 'message': '$error'};
+    }
   }
 
   @override

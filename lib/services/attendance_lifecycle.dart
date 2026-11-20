@@ -16,6 +16,14 @@
 ///    `leaving_date` are never counted as absent or open instructional days for
 ///    that student.
 class AttendanceLifecycle {
+  static const String reasonLeavingCertificate = 'lc';
+  static const String reasonContinuousAbsence = 'continuous_absence';
+
+  static const String labelLeavingCertificate =
+      'ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ';
+  static const String labelContinuousAbsence =
+      'સતત ગેરહાજરીથી નામ કમી કરેલ';
+
   static DateTime day(DateTime value) =>
       DateTime(value.year, value.month, value.day);
 
@@ -25,9 +33,13 @@ class AttendanceLifecycle {
   static DateTime lastOfMonth(DateTime value) =>
       DateTime(value.year, value.month + 1, 0);
 
-  /// First register month is the month AFTER admission/enrolment.
+  /// First register month is the month AFTER admission/enrolment, except for
+  /// June (month == 6), which is the start of the new academic year in Gujarat
+  /// schools so students admitted in June are included from June's register.
   static DateTime firstRegisterMonth(DateTime enrolledOn) =>
-      DateTime(enrolledOn.year, enrolledOn.month + 1, 1);
+      enrolledOn.month == 6
+          ? DateTime(enrolledOn.year, 6, 1)
+          : DateTime(enrolledOn.year, enrolledOn.month + 1, 1);
 
   /// Student remains on the register through the whole leaving month.
   static DateTime? lastRegisterMonth(DateTime? leftOn) =>
@@ -90,7 +102,7 @@ class AttendanceLifecycle {
           : day(enrolledOn);
       if (d.isBefore(start)) return false;
     }
-    if (leftOn != null && d.isAfter(day(leftOn))) {
+    if (leftOn != null && !d.isBefore(day(leftOn))) {
       return false;
     }
     return true;
@@ -151,29 +163,116 @@ class AttendanceLifecycle {
   /// Extracts canonical enrollment date from a student map without fabricating
   /// from `created_at` or `updated_at`.
   static DateTime? parseEnrollmentDate(Map<String, dynamic> student) {
-    for (final key in const <String>[
+    const keys = <String>[
       'enroll_school',
       'enrollment_date',
       'admission_date',
       'enroll_class',
-    ]) {
+    ];
+    for (final key in keys) {
       final dt = parseDate(student[key]);
       if (dt != null) return dt;
+    }
+    final cf = student['custom_fields'];
+    if (cf is Map) {
+      for (final key in keys) {
+        final dt = parseDate(cf[key]);
+        if (dt != null) return dt;
+      }
     }
     return null;
   }
 
-  /// Extracts canonical leaving date from a student map without fabricating
-  /// from `updated_at`.
+  /// Extracts canonical leaving date from a student map, checking top-level
+  /// and `custom_fields`, and falling back to `updated_at` only if the student
+  /// is explicitly marked inactive (`is_active == false`) without a date.
   static DateTime? parseLeavingDate(Map<String, dynamic> student) {
-    for (final key in const <String>[
+    const keys = <String>[
       'leaving_date',
       'exit_date',
       'left_date',
-    ]) {
+    ];
+    for (final key in keys) {
       final dt = parseDate(student[key]);
       if (dt != null) return dt;
     }
+    final cf = student['custom_fields'];
+    if (cf is Map) {
+      for (final key in keys) {
+        final dt = parseDate(cf[key]);
+        if (dt != null) return dt;
+      }
+    }
+    if (student['is_active'] == false) {
+      return parseDate(student['updated_at']);
+    }
     return null;
+  }
+
+  /// Extracts raw exit reason from top-level fields or `custom_fields`.
+  static String parseExitReason(Map<String, dynamic> student) {
+    for (final key in const <String>[
+      'exit_reason',
+      'leaving_reason',
+      'reason_for_leaving',
+      'archive_reason',
+    ]) {
+      final val = (student[key] ?? '').toString().trim();
+      if (val.isNotEmpty && val.toLowerCase() != 'null') return val;
+    }
+    final cf = student['custom_fields'];
+    if (cf is Map) {
+      for (final entry in cf.entries) {
+        final k = '${entry.key}'
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^a-z0-9\u0A80-\u0AFF]'), '');
+        if (const <String>{
+          'exitreason',
+          'leavingreason',
+          'reasonforleaving',
+          'archivereason',
+          'inactivereason',
+          'removalreason',
+          'reason',
+          'નામકમીકારણ',
+          'ગેરહાજરીનાકારણ',
+          'કારણ',
+        }.contains(k)) {
+          final v = (entry.value ?? '').toString().trim();
+          if (v.isNotEmpty && v.toLowerCase() != 'null') return v;
+        }
+      }
+    }
+    return '';
+  }
+
+  static bool isContinuousAbsenceReason(String rawReason) {
+    final text = rawReason.toLowerCase().replaceAll(RegExp(r'\s+'), '');
+    return text == reasonContinuousAbsence ||
+        text == 'long_absence' ||
+        text == 'removed_for_absence' ||
+        (text.contains('continuous') && text.contains('absence')) ||
+        (text.contains('long') && text.contains('absence')) ||
+        (text.contains('સતત') && text.contains('ગેરહાજ')) ||
+        (text.contains('ગેરહાજરી') && text.contains('કમી'));
+  }
+
+  static bool isLeavingCertificateReason(String rawReason) {
+    if (isContinuousAbsenceReason(rawReason)) return false;
+    final text = rawReason.toLowerCase().replaceAll(RegExp(r'\s+'), '');
+    if (text == 'promoted_graduated') return false;
+    return true;
+  }
+
+  static String hajariFrontPageReasonLabel(String rawReason) {
+    final r = rawReason.trim();
+    if (r.isEmpty) return '';
+    if (r.toLowerCase() == 'promoted_graduated') {
+      return 'ધોરણ 8 પૂર્ણ -> બઢતી (Promoted)';
+    }
+    if (isContinuousAbsenceReason(r)) {
+      return labelContinuousAbsence;
+    }
+    return labelLeavingCertificate;
   }
 }

@@ -1,7 +1,9 @@
 import 'package:pmshri_attendance/services/firebase_backend_client.dart';
 import 'package:flutter/material.dart';
 
+import 'package:share_plus/share_plus.dart';
 import '../services/school_class_order.dart';
+import '../services/school_export_service.dart';
 import '../services/supabase_student_service.dart';
 import 'archived_students_screen.dart';
 import 'student_bulk_import_screen.dart';
@@ -36,7 +38,18 @@ class _SupabaseStudentManagementScreenState
   List<Map<String, dynamic>> _allSchoolStudents = <Map<String, dynamic>>[];
   bool _includePromotedAndArchived = false;
   List<Map<String, dynamic>> _classes = <Map<String, dynamic>>[];
+  Set<String> _classTeacherClassIds = <String>{};
   Map<String, String> _classLabels = <String, String>{};
+
+  bool _canManageClass(String classId) {
+    if (widget.readOnly) return false;
+    if (_isAdmin) return true;
+    final cid = classId.trim();
+    if (cid.isEmpty || cid == '__ALL__') {
+      return _classTeacherClassIds.isNotEmpty;
+    }
+    return _classTeacherClassIds.contains(cid);
+  }
   late String _selectedClassId;
   late String _selectedClassLabel;
   String? _schoolRef;
@@ -82,8 +95,15 @@ class _SupabaseStudentManagementScreenState
         classRows.map((r) => Map<String, dynamic>.from(r)),
       );
       final isAdminUser = await _service.isCurrentUserAdmin();
-      if (!isAdminUser) {
+      Set<String> classTeacherIdSet = <String>{};
+      if (isAdminUser) {
+        classTeacherIdSet = sortedClasses.map((c) => '${c['id'] ?? ''}'.trim()).toSet();
+      } else {
         try {
+          final ctIds = await client.rpc('psm_class_teacher_class_ids');
+          if (ctIds is List) {
+            classTeacherIdSet = ctIds.map((e) => '${e ?? ''}'.trim()).where((s) => s.isNotEmpty).toSet();
+          }
           final allowedIds = await client.rpc('psm_attendance_class_ids');
           if (allowedIds is List) {
             final set = allowedIds.map((e) => '${e ?? ''}'.trim()).toSet();
@@ -99,6 +119,16 @@ class _SupabaseStudentManagementScreenState
         for (final c in sortedClasses)
           '${c['id']}': '${c['label'] ?? c['class_key'] ?? ''}',
       };
+      if (!widget.readOnly &&
+          _selectedClassId != '__ALL__' &&
+          _selectedClassId.isNotEmpty) {
+        try {
+          await client.rpc(
+            'psm_renumber_class_rolls',
+            params: <String, dynamic>{'p_class_id': _selectedClassId},
+          );
+        } catch (_) {}
+      }
       final results = await Future.wait<dynamic>(<Future<dynamic>>[
         _service.listStudents(classId: _selectedClassId),
         Future<bool>.value(isAdminUser),
@@ -142,6 +172,7 @@ class _SupabaseStudentManagementScreenState
         _schoolRef = ref;
         if (regType.isNotEmpty) _resolvedSchoolType = regType;
         _classes = sortedClasses;
+        _classTeacherClassIds = classTeacherIdSet;
         _classLabels = labels;
         _students = results[0] as List<Map<String, dynamic>>;
         _allSchoolStudents = fullList;
@@ -329,9 +360,22 @@ class _SupabaseStudentManagementScreenState
         : Map<String, dynamic>.from(existing);
     final targetClassId = existing != null
         ? '${existing['class_id'] ?? _selectedClassId}'
-        : (_selectedClassId == '__ALL__' && _classes.isNotEmpty
-            ? '${_classes.first['id']}'
+        : (_selectedClassId == '__ALL__'
+            ? (_classes.firstWhere(
+                  (c) => _canManageClass('${c['id']}'),
+                  orElse: () => _classes.isNotEmpty ? _classes.first : <String, dynamic>{},
+                )['id']?.toString() ?? '')
             : _selectedClassId);
+    if (!_canManageClass(targetClassId)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'માત્ર જે-તે વર્ગના વર્ગ શિક્ષક (Class Teacher) અથવા School Admin જ આ વર્ગમાં નવો વિદ્યાર્થી ઉમેરી કે સુધારી શકે છે. વિષય શિક્ષક (Subject Teacher) વિદ્યાર્થી ઉમેરી શકતા નથી.',
+          ),
+        ),
+      );
+      return;
+    }
     final controllers = <String, TextEditingController>{};
     const textKeys = <String>[
       'roll_number',
@@ -751,47 +795,74 @@ class _SupabaseStudentManagementScreenState
     }
   }
 
-  Future<void> _makeDeactivatedAllVisible(List<Map<String, dynamic>> visibleList) async {
-    if (widget.readOnly || _saving) return;
-    final activeTargets = visibleList.where((m) {
-      return m['is_active'] == true &&
-          '${m['leaving_date'] ?? ''}'.trim().isEmpty &&
-          '${m['exit_date'] ?? ''}'.trim().isEmpty;
-    }).toList();
-    if (activeTargets.isEmpty) return;
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Make Deactivated All / બધા વિદ્યાર્થીઓને નિષ્ક્રિય (Deactive) કરો'),
-        content: Text(
-          'શું તમે હાલની યાદીના બધા ${activeTargets.length} સક્રિય વિદ્યાર્થીઓને એકસાથે નિષ્ક્રિય (Deactive) કરવા માંગો છો?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel / રદ કરો'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text('Yes, Make Deactivated All (${activeTargets.length})'),
-          ),
-        ],
-      ),
-    );
-    if (accepted != true || !mounted) return;
+  Future<void> _exportWholeSchoolExcel() async {
+    if (_saving) return;
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      for (final student in activeTargets) {
-        await _service.archiveStudent(
-          classId: '${student['class_id'] ?? _selectedClassId}',
-          studentId: '${student['id']}',
+      final bundle = await SchoolExportService().exportForCurrentUser(
+        includePrivateDetails: _isAdmin,
+      );
+      await SharePlus.instance.share(
+        ShareParams(
+          files: <XFile>[
+            XFile.fromData(
+              bundle.bytes,
+              mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              name: bundle.fileName,
+            ),
+          ],
+          text: bundle.fileName,
+        ),
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ડાઉનલોડ પૂર્ણ: ${bundle.fileName}')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '$error'.replaceFirst('Exception: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _reRollSelectedClass() async {
+    if (widget.readOnly || _saving) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final client = Supabase.instance.client;
+      if (_selectedClassId == '__ALL__' || _selectedClassId.isEmpty) {
+        for (final c in _classes) {
+          final cid = '${c['id'] ?? ''}'.trim();
+          if (cid.isNotEmpty) {
+            await client.rpc(
+              'psm_renumber_class_rolls',
+              params: <String, dynamic>{'p_class_id': cid},
+            );
+          }
+        }
+      } else {
+        await client.rpc(
+          'psm_renumber_class_rolls',
+          params: <String, dynamic>{'p_class_id': _selectedClassId},
         );
       }
       await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('રોલ નંબર 1 થી સળંગ ગોઠવાઈ ગયા છે (Re-Roll 1..N Complete).'),
+          ),
+        );
+      }
     } catch (error) {
       if (mounted) {
         setState(() => _error = '$error'.replaceFirst('Exception: ', ''));
@@ -805,26 +876,94 @@ class _SupabaseStudentManagementScreenState
     if (widget.readOnly || _saving) return;
     final targetId = '${student['id'] ?? ''}'.trim();
     if (targetId.isEmpty) return;
+    final stClassId = '${student['class_id'] ?? _selectedClassId}'.trim();
+    if (!_canManageClass(stClassId)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'માત્ર જે-તે વર્ગના વર્ગ શિક્ષક (Class Teacher) અથવા School Admin જ વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરી શકે છે. વિષય શિક્ષક (Subject Teacher) Deactive કરી શકતા નથી.',
+          ),
+        ),
+      );
+      return;
+    }
+    var selectedDate = DateTime.now();
+    var selectedReason = 'lc';
     final accepted = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Deactive Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો'),
-        content: Text(
-          'શું તમે "${student['name'] ?? 'આ વિદ્યાર્થી'}" ને નિષ્ક્રિય (Deactive) કરવા માંગો છો? માત્ર આ ૧ જ વિદ્યાર્થી Deactive થશે અને રેકોર્ડ સુરક્ષિત રહેશે.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel / રદ કરો'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Deactive / નિષ્ક્રિય કરો'),
-          ),
-        ],
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final dateIso =
+              '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
+          final dateDmy =
+              '${selectedDate.day.toString().padLeft(2, '0')}/${selectedDate.month.toString().padLeft(2, '0')}/${selectedDate.year}';
+          return AlertDialog(
+            title: const Text('Deactive Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'શું તમે "${student['name'] ?? 'આ વિદ્યાર્થી'}" ને નિષ્ક્રિય (Deactive) કરવા માંગો છો? માત્ર આ ૧ જ વિદ્યાર્થી Deactive થશે અને રેકોર્ડ સુરક્ષિત રહેશે.',
+                ),
+                const SizedBox(height: 14),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: ctx,
+                      initialDate: selectedDate,
+                      firstDate: DateTime(2000, 1, 1),
+                      lastDate: DateTime.now().add(const Duration(days: 365)),
+                    );
+                    if (picked != null) {
+                      setDialogState(() => selectedDate = picked);
+                    }
+                  },
+                  icon: const Icon(Icons.event_outlined),
+                  label: Text('શાળા છોડ્યાની / કમી તારીખ: $dateDmy ($dateIso)'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  initialValue: selectedReason,
+                  decoration: const InputDecoration(
+                    labelText: 'હાજરીપત્રકના મુખપૃષ્ઠ મુજબ કમી કરવાનું કારણ',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'lc',
+                      child: Text('ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'continuous_absence',
+                      child: Text('સતત ગેરહાજરીથી નામ કમી કરેલ'),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setDialogState(() => selectedReason = v);
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel / રદ કરો'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Deactive / નિષ્ક્રિય કરો'),
+              ),
+            ],
+          );
+        },
       ),
     );
     if (accepted != true || !mounted) return;
+    final leavingIso =
+        '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
     setState(() {
       _saving = true;
       _error = null;
@@ -833,6 +972,8 @@ class _SupabaseStudentManagementScreenState
       await _service.archiveStudent(
         classId: '${student['class_id'] ?? _selectedClassId}',
         studentId: '${student['id']}',
+        leavingDate: leavingIso,
+        exitReason: selectedReason,
       );
       await _load();
     } catch (error) {
@@ -855,7 +996,7 @@ class _SupabaseStudentManagementScreenState
           overflow: TextOverflow.ellipsis,
         ),
         actions: [
-          if (!widget.readOnly)
+          if (_canManageClass(_selectedClassId))
             IconButton(
               tooltip: 'Bulk Upload / Whole-School Upload',
               onPressed: _saving
@@ -900,18 +1041,23 @@ class _SupabaseStudentManagementScreenState
                 child: const Icon(Icons.archive_outlined),
               ),
             ),
-          if (!widget.readOnly && visible.isNotEmpty)
+          IconButton(
+            tooltip: 'Download Whole School Data (Excel)',
+            onPressed: _saving ? null : _exportWholeSchoolExcel,
+            icon: const Icon(Icons.sim_card_download_outlined),
+          ),
+          if (_canManageClass(_selectedClassId) && visible.isNotEmpty)
             IconButton(
-              tooltip: 'Make Deactivated All',
-              onPressed: _saving ? null : () => _makeDeactivatedAllVisible(visible),
-              icon: Icon(Icons.person_off_outlined, color: Colors.red.shade700),
+              tooltip: 'Re-Roll Numbers (1..N)',
+              onPressed: _saving ? null : _reRollSelectedClass,
+              icon: const Icon(Icons.format_list_numbered),
             ),
           IconButton(
             onPressed: _loading ? null : _load,
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh',
           ),
-          if (!widget.readOnly)
+          if (_canManageClass(_selectedClassId))
             Padding(
               padding: const EdgeInsets.only(right: 12),
               child: FilledButton.icon(
@@ -1106,14 +1252,14 @@ class _SupabaseStudentManagementScreenState
                                             _showStudentWholeDataDialog(student),
                                         icon: const Icon(Icons.visibility_outlined),
                                       ),
-                                    if (!widget.readOnly) ...[
+                                    if (_canManageClass('${student['class_id'] ?? ''}')) ...[
                                       IconButton(
                                         tooltip: 'Edit',
                                         onPressed: () => _openEditor(student),
                                         icon: const Icon(Icons.edit_outlined),
                                       ),
                                       IconButton(
-                                        tooltip: 'Deactive / નિષ્ક્રિય કરો',
+                                        tooltip: 'Deactive / નિષ્ક્રિય કરો (માત્ર વર્ગ શિક્ષક / Admin)',
                                         onPressed: () =>
                                             _archiveStudent(student),
                                         icon: const Icon(

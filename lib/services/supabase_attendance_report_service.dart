@@ -199,22 +199,24 @@ class SupabaseAttendanceReportService {
     }
 
     final day = Map<String, dynamic>.from(dayRaw);
-    final marksRaw = await _client
-        .from('student_attendance')
-        .select('student_id,present,mdm,breakfast')
-        .eq('school_ref', schoolRef)
-        .eq('class_id', classId)
-        .eq('attendance_day_id', '${day['id']}');
-    final marks = marksRaw
-        .map((row) => Map<String, dynamic>.from(row))
-        .toList();
-
     final registered = day['registered_counts'] == null
         ? rosterCounts
         : _counts(day['registered_counts']);
     final present = _counts(day['present_counts']);
     final mdm = _counts(day['mdm_counts']);
     final savedGender = _asJsonMap(day['gender_breakdown']);
+    List<Map<String, dynamic>> marks = const <Map<String, dynamic>>[];
+    if (savedGender.isEmpty) {
+      final marksRaw = await _client
+          .from('student_attendance')
+          .select('student_id,present,mdm,breakfast')
+          .eq('school_ref', schoolRef)
+          .eq('class_id', classId)
+          .eq('attendance_day_id', '${day['id']}');
+      marks = marksRaw
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+    }
     final genderBreakdown = savedGender.isNotEmpty
         ? savedGender
         : _buildGenderBreakdown(students, marks);

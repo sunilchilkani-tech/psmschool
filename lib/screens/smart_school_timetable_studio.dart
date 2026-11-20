@@ -1744,7 +1744,13 @@ class _TimetableStudioHomeState extends State<TimetableStudioHome>
         : 'psm_timetable_device_autosave_v1';
   }
 
-  static const String _deviceTimingsKey = 'psm_timetable_timings_v1';
+  String get _deviceTimingsKey {
+    final schoolRef =
+        (widget.databaseData['schoolRef'] ?? '').toString().trim();
+    return schoolRef.isNotEmpty
+        ? 'psm_timetable_timings_$schoolRef'
+        : 'psm_timetable_timings_v1';
+  }
 
   @override
   void initState() {
@@ -1822,11 +1828,20 @@ class _TimetableStudioHomeState extends State<TimetableStudioHome>
       }
 
       // 2. Load full device save for this school
-      final rawFull = prefs.getString(_deviceSaveKey) ??
-          prefs.getString('psm_timetable_device_autosave_v1');
+      final schoolRef =
+          (widget.databaseData['schoolRef'] ?? '').toString().trim();
+      final rawFull = schoolRef.isNotEmpty
+          ? prefs.getString(_deviceSaveKey)
+          : (prefs.getString(_deviceSaveKey) ??
+              prefs.getString('psm_timetable_device_autosave_v1'));
       if (rawFull != null && rawFull.isNotEmpty) {
         final savedMap = _asPlanningMap(jsonDecode(rawFull));
-        if (savedMap.isNotEmpty) {
+        final dbAt = '${widget.savedData['savedAt'] ?? ''}'.trim();
+        final devAt = '${savedMap['savedAt'] ?? ''}'.trim();
+        final deviceIsNewer = widget.savedData.isEmpty ||
+            dbAt.isEmpty ||
+            (devAt.isNotEmpty && devAt.compareTo(dbAt) >= 0);
+        if (savedMap.isNotEmpty && deviceIsNewer) {
           _applySavedDatabaseData(savedMap);
           loadedAny = true;
           final savedAt = (savedMap['savedAt'] ?? '').toString();
@@ -1867,7 +1882,6 @@ class _TimetableStudioHomeState extends State<TimetableStudioHome>
       final prefs = await SharedPreferences.getInstance();
       final jsonStr = _exportJsonBackup();
       await prefs.setString(_deviceSaveKey, jsonStr);
-      await prefs.setString('psm_timetable_device_autosave_v1', jsonStr);
       // Also save standalone timings & breaks so period timings are always remembered on device
       final timingsPayload = jsonEncode(<String, dynamic>{
         'times': periodTimings.map((e) => e.toJson()).toList(),

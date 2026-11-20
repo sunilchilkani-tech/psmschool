@@ -252,16 +252,20 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
       _error = null;
     });
     try {
-      await _loadSchoolNamePreference();
+      if (_schoolRef.isEmpty) {
+        await _loadSchoolNamePreference();
+      }
       final isMonthly = _mode == _ReportMode.tarij || _mode == _ReportMode.mdm;
       final from = isMonthly
           ? _monthStart
           : _iso(_mode == _ReportMode.daily ? _toDate : _fromDate);
       final to = isMonthly ? _monthEnd : _iso(_toDate);
-      final rows = await _reports.getSchoolwideAttendanceRows(
-        fromDate: from,
-        toDate: to,
-      );
+      final rows = _mode == _ReportMode.daily
+          ? <Map<String, dynamic>>[]
+          : await _reports.getSchoolwideAttendanceRows(
+              fromDate: from,
+              toDate: to,
+            );
       var uniqueClasses = _uniqueClasses(rows);
       var reportAttendanceRows = rows;
       var tarijRows = <Map<String, dynamic>>[];
@@ -404,6 +408,7 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
         case _ReportMode.classwise:
           bytes = await _exports.exportClasswiseAllDataXlsx(
             schoolName: _schoolName,
+            schoolAddress: _schoolAddress,
             fromDate: _iso(_fromDate),
             toDate: _iso(_toDate),
             classRows: classes,
@@ -415,6 +420,7 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
         case _ReportMode.groupwise:
           bytes = await _exports.exportGroupwiseXlsx(
             schoolName: _schoolName,
+            schoolAddress: _schoolAddress,
             fromDate: _iso(_fromDate),
             toDate: _iso(_toDate),
             group: _group,
@@ -427,6 +433,7 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
         case _ReportMode.combine:
           bytes = await _exports.exportCombineReportXlsx(
             schoolName: _schoolName,
+            schoolAddress: _schoolAddress,
             fromDate: _iso(_fromDate),
             toDate: _iso(_toDate),
             rows: rows,
@@ -438,6 +445,7 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
           final tarijColumns = await _reports.getTarijSelectedColumnKeys();
           bytes = await _exports.exportTarijXlsx(
             schoolName: _schoolName,
+            schoolAddress: _schoolAddress,
             monthLabel: _monthLabel,
             classRows: classes,
             attendanceRows: rows,
@@ -451,6 +459,7 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
         case _ReportMode.mdm:
           bytes = await _exports.exportMdmEkandarXlsx(
             schoolName: _schoolName,
+            schoolAddress: _schoolAddress,
             monthLabel: _monthLabel,
             classRows: classes,
             attendanceRows: rows,
@@ -480,22 +489,15 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
     setState(() => _exporting = true);
     try {
       if (_mode == _ReportMode.daily && kIsWeb) {
-        final result = await _reports.getDailyReportRowsByDate(_iso(_toDate));
-        final rawClasses = result['classRows'];
-        final classes = rawClasses is List
-            ? SchoolClassOrder.sorted(
-                rawClasses
-                    .whereType<Map>()
-                    .map((row) => Map<String, dynamic>.from(row))
-                    .toList(),
-              )
-            : _classRows;
-        final selected = await _reports.getDateWiseSelectedColumnKeys();
+        final classes = _classRows;
+        final selected = _selectedColumnKeys.isNotEmpty
+            ? _selectedColumnKeys
+            : await _reports.getDateWiseSelectedColumnKeys();
         final html = _exports.buildDailyDatewisePrintHtml(
           schoolName: _schoolName,
-          schoolAddress: '${result['school_address'] ?? _schoolAddress}',
+          schoolAddress: _schoolAddress,
           date: _iso(_toDate),
-          attendanceSerial: '${result['serial'] ?? ''}',
+          attendanceSerial: _dailySerial,
           classRows: classes,
           visibleColumnKeys: selected,
         );
@@ -559,6 +561,7 @@ class _SupabaseReportsHubScreenState extends State<SupabaseReportsHubScreen> {
       final bytes = await _exports.buildSummaryPdfAsync(
         title: title,
         schoolName: _schoolName,
+        schoolAddress: _schoolAddress,
         periodLabel: period,
         headers: headers,
         rows: rows,

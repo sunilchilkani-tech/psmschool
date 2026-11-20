@@ -37,7 +37,7 @@ class _LeaveReportScreenState extends State<LeaveReportScreen> {
   ];
 
   String _reasonType = 'સામાજિક કારણસર';
-  final List<String> _reasonTypes = ['સામાજિક કારણસર', 'ધાર્મિક કારણસર', 'તબિયત ખરાબ હોવાથી', 'અન્ય (Other)'];
+  final List<String> _reasonTypes = ['સામાજિક કારણસર', 'ધાર્મિક કારણસર', 'તબિયત ખરાબ હોવાના', 'અન્ય (Other)'];
   final _customReasonCtrl = TextEditingController();
 
   @override

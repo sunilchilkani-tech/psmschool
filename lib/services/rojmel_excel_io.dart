@@ -1,9 +1,30 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:excel_community/excel_community.dart' as xls;
 
 import '../screens/supabase_rojmel_screen.dart';
 import 'indian_date.dart';
+
+/// One Grant Head row read from the Grant Heads Excel upload sheet.
+class RojmelGrantHeadImportRow {
+  RojmelGrantHeadImportRow({
+    required this.excelRow,
+    required this.headName,
+    required this.primaryAmount,
+    required this.cashOpeningAmount,
+    required this.activeStatus,
+  });
+
+  final int excelRow;
+  final String headName;
+  /// Annual Limit ₹ (for SNA / PFMS accounts) or Opening Bank Balance ₹ (for BANK accounts).
+  final double primaryAmount;
+  /// Opening Cash Balance ₹ (for BANK accounts only; 0 for SNA / PFMS).
+  final double cashOpeningAmount;
+  /// 'yes' (Active) or 'no' (Inactive).
+  final String activeStatus;
+}
 
 /// One data row read from the Rojmel upload sheet.
 class RojmelImportRow {
@@ -560,5 +581,411 @@ class RojmelExcelIO {
         int.tryParse(RegExp(r'પંક્તિ (\d+)').firstMatch(e)?.group(1) ?? '') ?? 0;
     errors.sort((a, b) => rowOf(a).compareTo(rowOf(b)));
     return errors;
+  }
+
+  // ---------------------------------------------------------------------------
+  // GRANT HEADS EXCEL TEMPLATE & UPLOAD (ACCOUNT-TYPE AWARE: LIMIT vs OPENING)
+  // ---------------------------------------------------------------------------
+
+  static const String grantHeadsUploadSheet = 'ગ્રાન્ટ હેડ અપલોડ (Grant Heads)';
+  static const String grantHeadsInstructionsSheet = 'સૂચના (Instructions)';
+
+  /// Builds a 2-sheet Excel template for adding/updating Grant Heads of [acc]:
+  ///  - Sheet 1: `ગ્રાન્ટ હેડ અપલોડ (Grant Heads)` (the upload sheet, tailored to
+  ///    Annual Limit for SNA/PFMS or Opening Bank/Cash Balance for BANK).
+  ///  - Sheet 2: `સૂચના (Instructions)` (step-by-step instructions & examples).
+  static Uint8List buildGrantHeadsTemplate(RojmelEngine engine, String acc) {
+    final m = engine.getAccountMeta(acc);
+    final isLimitAccount = m.isSnaOrPfms;
+    final existingHeads = engine.getAccountSpecificHeads(acc);
+
+    final x = xls.Excel.createExcel();
+    x.rename('Sheet1', grantHeadsUploadSheet);
+
+    final titleStyle = xls.CellStyle(
+      bold: true,
+      fontSize: 13,
+      fontColorHex: xls.ExcelColor.fromHexString('#FFFFFF'),
+      backgroundColorHex: xls.ExcelColor.fromHexString('#1A2744'),
+    );
+    final headStyle = xls.CellStyle(
+      bold: true,
+      fontColorHex: xls.ExcelColor.fromHexString('#FFFFFF'),
+      backgroundColorHex: xls.ExcelColor.fromHexString('#0B4F6C'),
+      textWrapping: xls.TextWrapping.WrapText,
+      horizontalAlign: xls.HorizontalAlign.Center,
+      verticalAlign: xls.VerticalAlign.Center,
+    );
+    final noteStyle = xls.CellStyle(
+      bold: true,
+      fontColorHex: xls.ExcelColor.fromHexString('#92400E'),
+      backgroundColorHex: xls.ExcelColor.fromHexString('#FFF8E7'),
+    );
+    final sectionStyle = xls.CellStyle(
+      bold: true,
+      fontColorHex: xls.ExcelColor.fromHexString('#065F46'),
+      backgroundColorHex: xls.ExcelColor.fromHexString('#DCFCE7'),
+    );
+
+    void put(xls.Sheet s, int r, int c, Object? v, [xls.CellStyle? st]) {
+      final cell = s.cell(xls.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: r));
+      if (v is num) {
+        cell.value = v == v.roundToDouble()
+            ? xls.IntCellValue(v.toInt())
+            : xls.DoubleCellValue(v.toDouble());
+      } else {
+        cell.value = xls.TextCellValue('${v ?? ''}');
+      }
+      if (st != null) cell.cellStyle = st;
+    }
+
+    // --- Sheet 1: Grant Heads Upload Sheet ---
+    final up = x[grantHeadsUploadSheet];
+    final cols = isLimitAccount
+        ? const <String>[
+            'ક્રમ (Sr. No.)',
+            'ગ્રાન્ટ હેડનું નામ * (Grant Head Name)',
+            'વાર્ષિક લિમિટ ₹ * (Annual Limit ₹)',
+            'સ્થિતિ (Active / Inactive)',
+          ]
+        : const <String>[
+            'ક્રમ (Sr. No.)',
+            'ગ્રાન્ટ હેડનું નામ * (Grant Head Name)',
+            'ઉઘડતી બેન્ક સિલક ₹ * (Opening Bank Balance ₹)',
+            'ઉઘડતી રોકડ સિલક ₹ (Opening Cash Balance ₹)',
+            'સ્થિતિ (Active / Inactive)',
+          ];
+    final colWidths = isLimitAccount
+        ? const <double>[10, 48, 28, 22]
+        : const <double>[10, 48, 28, 28, 22];
+
+    put(
+      up,
+      0,
+      0,
+      isLimitAccount
+          ? 'રોજમેળ ગ્રાન્ટ હેડ અને વાર્ષિક લિમિટ અપલોડ ટેમ્પ્લેટ (SNA SPARSH / PFMS ખાતું)'
+          : 'રોજમેળ ગ્રાન્ટ હેડ અને ઉઘડતી સિલક અપલોડ ટેમ્પ્લેટ (BANK ખાતું)',
+      titleStyle,
+    );
+    for (var c = 1; c < cols.length; c++) {
+      put(up, 0, c, '', titleStyle);
+    }
+    put(up, 1, 0, 'ખાતું (Account)', noteStyle);
+    put(up, 1, 1, acc, noteStyle);
+    put(up, 1, 2, 'ખાતાનો પ્રકાર: ${typeLabel(m)}', noteStyle);
+    put(
+      up,
+      1,
+      3,
+      isLimitAccount ? 'વાર્ષિક લિમિટ (Annual Limit ₹)' : 'ઉઘડતી સિલક (Opening Balance ₹)',
+      noteStyle,
+    );
+    if (!isLimitAccount && cols.length > 4) {
+      put(up, 1, 4, '', noteStyle);
+    }
+
+    put(
+      up,
+      2,
+      0,
+      isLimitAccount
+          ? 'નીચે પંક્તિ 5 થી ગ્રાન્ટ હેડનું નામ અને વાર્ષિક લિમિટ (₹) લખો. બીજી શીટ "સૂચના (Instructions)" માં સંપૂર્ણ માર્ગદર્શન આપેલ છે.'
+          : 'નીચે પંક્તિ 5 થી ગ્રાન્ટ હેડનું નામ અને ઉઘડતી બેન્ક/રોકડ સિલક (₹) લખો (ન હોય તો 0 લખો). બીજી શીટ "સૂચના (Instructions)" જુઓ.',
+    );
+
+    for (var c = 0; c < cols.length; c++) {
+      put(up, _headerRow, c, cols[c], headStyle);
+      up.setColumnWidth(c, colWidths[c]);
+    }
+
+    const totalTemplateRows = 120;
+    final rowCount = existingHeads.length > totalTemplateRows
+        ? existingHeads.length + 20
+        : totalTemplateRows;
+
+    for (var i = 0; i < rowCount; i++) {
+      final rIdx = _headerRow + 1 + i;
+      put(up, rIdx, 0, i + 1);
+      if (i < existingHeads.length) {
+        final h = existingHeads[i];
+        final isAct = engine.grantHeadActiveMap[h] != 'no';
+        put(up, rIdx, 1, h);
+        if (isLimitAccount) {
+          put(up, rIdx, 2, engine.getHeadLimit(acc, h));
+          put(up, rIdx, 3, isAct ? 'Active' : 'Inactive');
+        } else {
+          final ob = engine.getHeadOpening(acc, h);
+          put(up, rIdx, 2, ob.bank);
+          put(up, rIdx, 3, ob.cash);
+          put(up, rIdx, 4, isAct ? 'Active' : 'Inactive');
+        }
+      }
+    }
+
+    final firstExcelRow = _headerRow + 2;
+    final lastExcelRow = _headerRow + 1 + rowCount;
+    final statusColLetter = isLimitAccount ? 'D' : 'E';
+    up.addDataValidation(
+      '$statusColLetter$firstExcelRow:$statusColLetter$lastExcelRow',
+      xls.DataValidation.list(const ['Active', 'Inactive'])
+          .withPrompt('સ્થિતિ (Status)', 'Active અથવા Inactive પસંદ કરો (ખાલી રાખશો તો Active ગણાશે).')
+          .withError('ખોટી સ્થિતિ', 'માત્ર Active અથવા Inactive લખો.'),
+    );
+
+    // --- Sheet 2: Instructions Sheet (Other Sheet) ---
+    final ins = x[grantHeadsInstructionsSheet];
+    ins.setColumnWidth(0, 8);
+    ins.setColumnWidth(1, 115);
+    ins.setColumnWidth(2, 28);
+    ins.setColumnWidth(3, 28);
+
+    put(ins, 0, 0, 'રોજમેળ ગ્રાન્ટ હેડ Excel અપલોડ — સંપૂર્ણ સૂચના (Instructions)', titleStyle);
+    put(ins, 0, 1, '', titleStyle);
+    put(ins, 1, 0, 'ખાતું', noteStyle);
+    put(ins, 1, 1, '$acc  •  પ્રકાર: ${typeLabel(m)}', noteStyle);
+
+    final steps = <String>[
+      'પગલું ૧: સૌપ્રથમ રોજમેળમાં "Rojmel Accounts" પેનલમાં જઈને તમારું ખાતું (Account) બનાવો અને સેવ કરો.',
+      'પગલું ૨: ખાતું બની ગયા પછી તે ખાતું પસંદ કરી "ગ્રાન્ટ હેડ ટેમ્પ્લેટ ડાઉનલોડ" બટન પર ક્લિક કરો.',
+      'પગલું ૩: આ ફાઈલની પ્રથમ શીટ "$grantHeadsUploadSheet" માં જ ગ્રાન્ટ હેડની વિગતો ભરો. હેડર લાઇન (પંક્તિ 4) કે ખાતાનું નામ (પંક્તિ 2) બદલશો નહીં.',
+      isLimitAccount
+          ? 'પગલું ૪ (SNA SPARSH / PFMS ખાતું): આ ખાતું ${typeLabel(m)} પ્રકારનું હોવાથી કોલમ C માં દરેક ગ્રાન્ટ હેડની "વાર્ષિક લિમિટ ₹ (Annual Limit ₹)" લખો (દા.ત. 50000, 12500). જો લિમિટ 0 કે ખાલી હશે તો 0 સેટ થશે.'
+          : 'પગલું ૪ (BANK ખાતું): આ ખાતું BANK પ્રકારનું હોવાથી કોલમ C માં દરેક ગ્રાન્ટ હેડની "ઉઘડતી બેન્ક સિલક ₹ (Opening Bank Balance)" અને કોલમ D માં "ઉઘડતી રોકડ સિલક ₹ (Opening Cash Balance)" લખો (જો ઉઘડતી સિલક ન હોય તો 0 લખો).',
+      'પગલું ૫: જો ખાતામાં પહેલેથી કોઈ ગ્રાન્ટ હેડ સેવ કરેલા હશે, તો તે પ્રથમ શીટમાં પહેલેથી ભરેલા દેખાશે. તમે તેની લિમિટ/સિલક સુધારી શકો છો અને નીચેની ખાલી લાઇનમાં નવા ગ્રાન્ટ હેડ ઉમેરી શકો છો.',
+      'પગલું ૬: એક જ નામનો ગ્રાન્ટ હેડ બે વાર લખશો નહીં. જો પહેલેથી રહેલા ગ્રાન્ટ હેડનું નામ ફરીથી આવશે, તો તેની નવી લિમિટ / ઉઘડતી સિલક અપડેટ થઈ જશે.',
+      'પગલું ૭: ફાઈલ સેવ કરીને રોજમેળમાં "ગ્રાન્ટ હેડ Excel અપલોડ" બટનથી અપલોડ કરો અને ત્યારબાદ "💾 SAVE" દબાવી સર્વર પર સેવ કરો.',
+    ];
+
+    for (var i = 0; i < steps.length; i++) {
+      put(ins, 3 + i, 0, i + 1);
+      put(ins, 3 + i, 1, steps[i]);
+    }
+
+    var exRow = 3 + steps.length + 2;
+    put(ins, exRow, 0, '', sectionStyle);
+    put(
+      ins,
+      exRow,
+      1,
+      isLimitAccount
+          ? 'નમૂના (Example for SNA SPARSH / PFMS Account — Annual Limit ₹)'
+          : 'નમૂના (Example for BANK Account — Opening Bank & Cash Balance ₹)',
+      sectionStyle,
+    );
+    put(ins, exRow, 2, isLimitAccount ? 'વાર્ષિક લિમિટ ₹' : 'ઉઘડતી બેન્ક ₹', sectionStyle);
+    put(ins, exRow, 3, isLimitAccount ? 'સ્થિતિ' : 'ઉઘડતી રોકડ ₹', sectionStyle);
+    exRow++;
+
+    final sampleHeads = <(String, num, num)>[
+      ('શાળા સંયુક્ત ગ્રાન્ટ (Composite School Grant)', 50000, 0),
+      ('સ્વચ્છતા એક્શન પ્લાન ગ્રાન્ટ (Swachhta Grant)', 15000, 0),
+      ('રમત-ગમત ગ્રાન્ટ (Sports Grant)', 10000, 0),
+      ('SMC તાલીમ ગ્રાન્ટ (SMC Training)', 3000, 0),
+    ];
+    for (var i = 0; i < sampleHeads.length; i++) {
+      final s = sampleHeads[i];
+      put(ins, exRow, 0, i + 1);
+      put(ins, exRow, 1, s.$1);
+      put(ins, exRow, 2, s.$2);
+      put(ins, exRow, 3, isLimitAccount ? 'Active' : s.$3);
+      exRow++;
+    }
+
+    final bytes = x.encode();
+    if (bytes == null) {
+      throw StateError('Grant Heads Excel template could not be created.');
+    }
+    return Uint8List.fromList(bytes);
+  }
+
+  /// Parses an uploaded Grant Heads Excel file.
+  static ({
+    String account,
+    List<RojmelGrantHeadImportRow> rows,
+    List<String> errors,
+  }) parseGrantHeadsUpload(Uint8List bytes, AccountMeta m) {
+    final isLimitAccount = m.isSnaOrPfms;
+    final errors = <String>[];
+    final rows = <RojmelGrantHeadImportRow>[];
+
+    String at(List<xls.Data?> r, int c) => c < r.length ? _cellText(r[c]) : '';
+    bool isHeaderRow(List<xls.Data?> r) {
+      final c0 = at(r, 0).toLowerCase();
+      final c1 = at(r, 1).toLowerCase();
+      if (c1.contains('ગ્રાન્ટ હેડનું નામ') || c1.contains('grant head name')) {
+        return true;
+      }
+      if ((c0.startsWith('ક્રમ') || c0.contains('sr.')) &&
+          (c1.contains('ગ્રાન્ટ હેડ') || c1.contains('grant head'))) {
+        return true;
+      }
+      return false;
+    }
+
+    final x = xls.Excel.decodeBytes(bytes);
+    xls.Sheet? sheet = x.tables[grantHeadsUploadSheet];
+    sheet ??= x.tables.values.firstWhere(
+      (s) => s.rows.take(10).any(isHeaderRow),
+      orElse: () => x.tables.values.first,
+    );
+
+    final all = sheet.rows;
+    var headerIdx = -1;
+    for (var i = 0; i < all.length && i < 10; i++) {
+      if (isHeaderRow(all[i])) {
+        headerIdx = i;
+        break;
+      }
+    }
+    if (headerIdx < 0) {
+      return (
+        account: '',
+        rows: rows,
+        errors: <String>[
+          'આ ફાઈલ ગ્રાન્ટ હેડ ટેમ્પ્લેટ નથી — "$grantHeadsUploadSheet" શીટમાં હેડર લાઇન મળી નથી. પહેલાં ગ્રાન્ટ હેડ ટેમ્પ્લેટ ડાઉનલોડ કરો.',
+        ],
+      );
+    }
+
+    var account = '';
+    for (var i = 0; i < headerIdx; i++) {
+      if (at(all[i], 0).contains('ખાતું') && all[i].length > 1) {
+        account = at(all[i], 1).trim();
+        break;
+      }
+    }
+
+    double? parseMoney(String raw) {
+      final cleaned = raw.replaceAll(',', '').replaceAll('₹', '').trim();
+      if (cleaned.isEmpty) return 0.0;
+      const guj = '૦૧૨૩૪૫૬૭૮૯';
+      var norm = cleaned;
+      for (var i = 0; i < guj.length; i++) {
+        norm = norm.replaceAll(guj[i], '$i');
+      }
+      return double.tryParse(norm);
+    }
+
+    final seenNames = <String>{};
+    for (var i = headerIdx + 1; i < all.length; i++) {
+      final r = all[i];
+      final c0Raw = at(r, 0).trim();
+      final headName = at(r, 1).replaceAll(RegExp(r'\s+'), ' ').trim();
+      final col2Raw = at(r, 2).trim();
+      final col3Raw = at(r, 3).trim();
+      final col4Raw = at(r, 4).trim();
+
+      // Skip any repeated header or metadata row
+      if (isHeaderRow(r) ||
+          c0Raw.startsWith('ખાતું') ||
+          c0Raw.startsWith('રોજમેળ') ||
+          c0Raw.startsWith('નીચે પંક્તિ')) {
+        continue;
+      }
+
+      if (headName.isEmpty && col2Raw.isEmpty && (isLimitAccount || col3Raw.isEmpty)) {
+        continue; // blank pre-numbered row
+      }
+      final excelRow = i + 1;
+      if (headName.isEmpty) {
+        errors.add('પંક્તિ $excelRow: ગ્રાન્ટ હેડનું નામ ખાલી છે.');
+        continue;
+      }
+      final lowerKey = headName.toLowerCase();
+      if (seenNames.contains(lowerKey)) {
+        errors.add('પંક્તિ $excelRow: ગ્રાન્ટ હેડ "$headName" આ ફાઈલમાં બે વાર લખાયેલ છે.');
+        continue;
+      }
+      seenNames.add(lowerKey);
+
+      final primaryAmt = parseMoney(col2Raw);
+      if (primaryAmt == null || primaryAmt < 0) {
+        errors.add(
+          isLimitAccount
+              ? 'પંક્તિ $excelRow ("$headName"): વાર્ષિક લિમિટ સાચી રકમમાં લખો (0 અથવા વધુ).'
+              : 'પંક્તિ $excelRow ("$headName"): ઉઘડતી બેન્ક સિલક સાચી રકમમાં લખો (0 અથવા વધુ).',
+        );
+        continue;
+      }
+
+      double cashAmt = 0.0;
+      String statusRaw = col3Raw;
+      if (!isLimitAccount) {
+        final parsedCash = parseMoney(col3Raw);
+        if (parsedCash == null || parsedCash < 0) {
+          errors.add(
+            'પંક્તિ $excelRow ("$headName"): ઉઘડતી રોકડ સિલક સાચી રકમમાં લખો (0 અથવા વધુ).',
+          );
+          continue;
+        }
+        cashAmt = parsedCash;
+        statusRaw = col4Raw;
+      }
+
+      final stLower = statusRaw.trim().toLowerCase();
+      final activeStatus = (stLower == 'inactive' || stLower == 'no' || stLower.contains('બંધ'))
+          ? 'no'
+          : 'yes';
+
+      rows.add(
+        RojmelGrantHeadImportRow(
+          excelRow: excelRow,
+          headName: headName,
+          primaryAmount: primaryAmt,
+          cashOpeningAmount: cashAmt,
+          activeStatus: activeStatus,
+        ),
+      );
+    }
+
+    if (rows.isEmpty && errors.isEmpty) {
+      errors.add('"$grantHeadsUploadSheet" શીટમાં કોઈ ગ્રાન્ટ હેડ લખેલ નથી.');
+    }
+    return (account: account, rows: rows, errors: errors);
+  }
+
+  /// Applies validated Grant Head rows to [acc] in [engine].
+  static int applyGrantHeadsRows(
+    RojmelEngine engine,
+    String acc,
+    List<RojmelGrantHeadImportRow> rows,
+  ) {
+    final meta = engine.getAccountMeta(acc);
+    final isLimitAccount = meta.isSnaOrPfms;
+    final currentHeads = List<String>.from(engine.getAccountSpecificHeads(acc));
+
+    for (final row in rows) {
+      final h = row.headName.trim();
+      if (h.isEmpty) continue;
+      if (!currentHeads.contains(h)) {
+        currentHeads.add(h);
+      }
+      engine.grantHeadActiveMap[h] = row.activeStatus;
+      if (isLimitAccount) {
+        engine.setSingleHeadLimit(acc, h, row.primaryAmount);
+      } else {
+        meta.headOpenings[h] = HeadBalance(
+          cash: math.max(0.0, row.cashOpeningAmount),
+          bank: math.max(0.0, row.primaryAmount),
+        );
+      }
+    }
+
+    if (!isLimitAccount) {
+      double b = 0.0, c = 0.0;
+      meta.headOpenings.forEach((_, v) {
+        b += v.bank;
+        c += v.cash;
+      });
+      meta.openingBank = b;
+      meta.openingCash = c;
+      meta.openingConfigured = true;
+      engine.accountMeta[acc] = meta;
+    }
+
+    engine.setAccountSpecificHeads(acc, currentHeads);
+    engine.triggerUpdate();
+    return rows.length;
   }
 }

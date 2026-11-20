@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:pmshri_attendance/services/firebase_backend_client.dart';
 
 import '../models/models.dart';
+import '../services/school_name_language_service.dart';
 import '../services/supabase_attendance_report_service.dart';
 import '../services/school_class_order.dart';
 import 'datewise_columns_settings_dialog.dart';
@@ -37,8 +38,63 @@ class SupabaseAttendanceWorkspaceScreen extends StatefulWidget {
 
 class _SupabaseAttendanceWorkspaceScreenState
     extends State<SupabaseAttendanceWorkspaceScreen> {
+  bool _enabled(String key) {
+    final devShowAll = widget.profile['developer_show_all_modules'] == true ||
+        (Supabase.instance.client.isDeveloperImpersonatingSchool &&
+            widget.profile['developer_show_all_modules'] != false);
+    return SchoolModuleRegistry.isModuleEnabled(
+      key,
+      profile: widget.profile,
+      developerShowAll: devShowAll,
+    );
+  }
+
+  Widget _disabledTabView(String title) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.lock_outline_rounded,
+                  size: 48,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'આ મોડ્યુલ ડેવલપર દ્વારા આ શાળા માટે બંધ રાખવામાં આવેલ છે. (This module is not enabled for this school.)',
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final attEnabled = _enabled('attendance');
+    final repEnabled = _enabled('reports');
+    final mpEnabled = _enabled('most_present');
+    final libEnabled = _enabled('library');
+    final pmEnabled = _enabled('parent_message');
+    final searchEnabled = _enabled('student_search');
+
     return DefaultTabController(
       length: 6,
       initialIndex: widget.initialIndex.clamp(0, 5).toInt(),
@@ -46,14 +102,15 @@ class _SupabaseAttendanceWorkspaceScreenState
         appBar: AppBar(
           title: Text(widget.readOnly ? 'Attendance Reports / અહેવાલ' : 'Attendance / હાજરી'),
           actions: [
-            IconButton(
-              tooltip: 'Global Student Search / વિદ્યાર્થી ગ્લોબલ સર્ચ',
-              onPressed: () => showGlobalStudentSearchDialog(
-                context,
-                readOnly: widget.readOnly,
+            if (searchEnabled)
+              IconButton(
+                tooltip: 'Global Student Search / વિદ્યાર્થી ગ્લોબલ સર્ચ',
+                onPressed: () => showGlobalStudentSearchDialog(
+                  context,
+                  readOnly: widget.readOnly,
+                ),
+                icon: const Icon(Icons.person_search_rounded),
               ),
-              icon: const Icon(Icons.person_search_rounded),
-            ),
           ],
           bottom: const TabBar(
             isScrollable: true,
@@ -68,18 +125,40 @@ class _SupabaseAttendanceWorkspaceScreenState
           ),
         ),
         body: TabBarView(
-            physics: const NeverScrollableScrollPhysics(),
+          physics: const NeverScrollableScrollPhysics(),
           children: <Widget>[
-            SupabaseAttendanceEntryScreen(
-              profile: widget.profile,
-              readOnly: widget.readOnly,
-              showAppBar: false,
-            ),
-            const _SupabaseHistoryTab(),
-            SupabaseReportsHubScreen(profile: widget.profile, readOnly: widget.readOnly),
-            const _SupabaseMostPresentTab(),
-            SupabaseLibraryScreen(profile: widget.profile, readOnly: widget.readOnly, embedded: true),
-            SupabaseParentAttendanceMessageScreen(profile: widget.profile, readOnly: widget.readOnly),
+            attEnabled
+                ? SupabaseAttendanceEntryScreen(
+                    profile: widget.profile,
+                    readOnly: widget.readOnly,
+                    showAppBar: false,
+                  )
+                : _disabledTabView('Attendance / હાજરી નોંધણી'),
+            (attEnabled || repEnabled)
+                ? const _SupabaseHistoryTab()
+                : _disabledTabView('History / વર્ગ ઇતિહાસ'),
+            repEnabled
+                ? SupabaseReportsHubScreen(
+                    profile: widget.profile,
+                    readOnly: widget.readOnly,
+                  )
+                : _disabledTabView('Reports / હાજરી અહેવાલ'),
+            mpEnabled
+                ? const _SupabaseMostPresentTab()
+                : _disabledTabView('Most Present / સૌથી વધુ હાજર'),
+            libEnabled
+                ? SupabaseLibraryScreen(
+                    profile: widget.profile,
+                    readOnly: widget.readOnly,
+                    embedded: true,
+                  )
+                : _disabledTabView('Library Register / પુસ્તકાલય રજીસ્ટર'),
+            pmEnabled
+                ? SupabaseParentAttendanceMessageScreen(
+                    profile: widget.profile,
+                    readOnly: widget.readOnly,
+                  )
+                : _disabledTabView('Parent Message / વાલી સંદેશ'),
           ],
         ),
       ),

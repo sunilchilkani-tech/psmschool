@@ -174,6 +174,8 @@ class SupabaseHajariPatrakService {
     required String classId,
     required int year,
     required int month,
+    String promotionPeriod = 'new',
+    bool includeDailyMarks = true,
   }) async {
     final schoolRef = await currentSchoolRef();
     final first = DateTime(year, month, 1);
@@ -188,7 +190,7 @@ class SupabaseHajariPatrakService {
     final queryResults = await Future.wait<dynamic>([
       _client
           .from('students')
-          .select('id,class_id,roll_number,previous_roll_number,gr,dd,mm,yyyy,name,caste,category,gender,enroll_school,enroll_class,custom_fields,section_history,is_active,created_at,updated_at,leaving_date')
+          .select('id,class_id,roll_number,previous_roll_number,previous_enroll_class,promotion_history,promoted_from_class_id,promoted_from_class_label,promoted_at,gr,dd,mm,yyyy,name,caste,category,gender,enroll_school,enroll_class,custom_fields,section_history,is_active,created_at,updated_at,leaving_date,exit_date,exit_reason,leaving_reason')
           .eq('school_ref', schoolRef)
           .order('roll_number'),
       _client
@@ -210,21 +212,90 @@ class SupabaseHajariPatrakService {
     final rawAttendance = queryResults[1] as List;
     final rawHolidays = queryResults[2] as List;
 
-    final studentsAll = rawStudents
+    final allParsedStudents = rawStudents
         .map((row) => Map<String, dynamic>.from(row))
-        .where((student) => _effectiveClassIdForRegisterMonth(student, first) == classId)
         .toList();
-    final roster = studentsAll
-        .where((student) => _belongsToMonth(student, first, last))
-        .map((student) {
-          final copy = Map<String, dynamic>.from(student);
-          final histRoll = _historicalRollForRegisterMonth(copy, first, classId);
-          if (histRoll.isNotEmpty) {
-            copy['roll_number'] = histRoll;
+
+    Map<String, dynamic>? findPromotionInThisMonth(Map<String, dynamic> st) {
+      final hist = st['promotion_history'];
+      if (hist is List) {
+        for (final entry in hist.reversed) {
+          if (entry is! Map) continue;
+          final eMap = Map<String, dynamic>.from(entry);
+          final pDate = _parseDate(_text(eMap['new_enroll_class']).isNotEmpty
+              ? eMap['new_enroll_class']
+              : eMap['promoted_at']);
+          if (pDate != null && pDate.year == year && pDate.month == month) {
+            return eMap;
           }
-          return copy;
-        })
-        .toList();
+        }
+      }
+      final promoAt = _parseDate(st['promoted_at']);
+      final newEnroll = _parseDate(st['enroll_class']);
+      final refDate = newEnroll ?? promoAt;
+      if (refDate != null &&
+          refDate.year == year &&
+          refDate.month == month &&
+          _text(st['promoted_from_class_id']).isNotEmpty) {
+        return <String, dynamic>{
+          'from_class_id': _text(st['promoted_from_class_id']),
+          'from_class_label': _text(st['promoted_from_class_label']),
+          'to_class_id': _text(st['class_id']),
+          'old_enroll_class': _text(st['previous_enroll_class']),
+          'new_enroll_class': _text(st['enroll_class']),
+          'old_roll_number': _text(st['previous_roll_number']),
+          'promoted_at': _text(st['promoted_at']),
+        };
+      }
+      return null;
+    }
+
+    final List<Map<String, dynamic>> studentsAll;
+    final List<Map<String, dynamic>> roster;
+    if (promotionPeriod == 'old') {
+      final oldList = <Map<String, dynamic>>[];
+      for (final student in allParsedStudents) {
+        final promo = findPromotionInThisMonth(student);
+        if (promo != null) {
+          if (_text(promo['from_class_id']) != classId) continue;
+          final copy = Map<String, dynamic>.from(student);
+          copy['class_id'] = classId;
+          final oldEnroll = _text(promo['old_enroll_class']);
+          if (oldEnroll.isNotEmpty) {
+            copy['enroll_class'] = oldEnroll;
+          }
+          final oldRoll = _text(promo['old_roll_number']);
+          if (oldRoll.isNotEmpty) {
+            copy['roll_number'] = oldRoll;
+          }
+          oldList.add(copy);
+        } else if (_effectiveClassIdForRegisterMonth(student, first) == classId &&
+            _belongsToMonth(student, first, last)) {
+          // Retained or graduated students from this class in this month
+          if (_text(student['promoted_from_class_id']).isEmpty ||
+              _text(student['promoted_from_class_id']) == classId) {
+            oldList.add(Map<String, dynamic>.from(student));
+          }
+        }
+      }
+      studentsAll = oldList;
+      roster = oldList;
+    } else {
+      studentsAll = allParsedStudents
+          .where((student) => _effectiveClassIdForRegisterMonth(student, first) == classId)
+          .toList();
+      roster = studentsAll
+          .where((student) => _belongsToMonth(student, first, last))
+          .map((student) {
+            final copy = Map<String, dynamic>.from(student);
+            final histRoll = _historicalRollForRegisterMonth(copy, first, classId);
+            if (histRoll.isNotEmpty) {
+              copy['roll_number'] = histRoll;
+            }
+            return copy;
+          })
+          .toList();
+    }
     roster.sort((a, b) {
       final ar = _text(a['roll_number']).isNotEmpty
           ? _text(a['roll_number'])
@@ -237,6 +308,11 @@ class SupabaseHajariPatrakService {
       if (an != null && bn != null && an != bn) return an.compareTo(bn);
       if (an != null && bn == null) return -1;
       if (an == null && bn != null) return 1;
+      final aLeft = _text(a['roll_number']).isEmpty &&
+          _text(a['previous_roll_number']).isNotEmpty;
+      final bLeft = _text(b['roll_number']).isEmpty &&
+          _text(b['previous_roll_number']).isNotEmpty;
+      if (aLeft != bLeft) return aLeft ? -1 : 1;
       return _text(a['name']).compareTo(_text(b['name']));
     });
     // Ensure roll numbers always start at 1 and continue 1..N without gaps
@@ -269,7 +345,7 @@ class SupabaseHajariPatrakService {
     }
 
     final studentDailyMarks = <String, Map<int, Map<String, bool>>>{};
-    if (dayNumByDayId.isNotEmpty) {
+    if (includeDailyMarks && dayNumByDayId.isNotEmpty) {
       try {
         final dayIds = dayNumByDayId.keys.toList();
         final marks = await _client
@@ -314,6 +390,7 @@ class SupabaseHajariPatrakService {
       // register, but they have recorded attendance, so the recorded
       // register lists them (after the regular roster).
       'mid_month_joiners': studentsAll.where((student) {
+        if (_belongsToMonth(student, first, last)) return false;
         final enrolled = AttendanceLifecycle.parseEnrollmentDate(student);
         return enrolled != null &&
             enrolled.year == first.year &&
@@ -1042,21 +1119,64 @@ class SupabaseHajariPatrakService {
         i: pw.FixedColumnWidth(coverTableWidth * tableFlex[i] / flexSum),
     };
 
-    // Only the registered/opening-strength row is populated on the cover.
-    // Admissions, exits, continuous-absence removals and closing strength are
-    // intentionally left blank for the teacher to complete at month-end.
     List<String> blankCoverMetricRow(String label) => <String>[
       label,
       ...List<String>.filled(singleGenderSchool ? 8 : 14, ''),
     ];
+    List<String> buildCoverMetricRow(
+      String label,
+      List<Map<String, dynamic>> subset,
+    ) {
+      if (!fillRecordedAttendance) return blankCoverMetricRow(label);
+      final counts = _genderCategoryCounts(subset, schoolType);
+      return singleGenderSchool
+          ? _frontSingleMetricRow(label, counts, schoolType)
+          : _frontMetricRow(label, counts, schoolType);
+    }
+
+    final admissionsList = <Map<String, dynamic>>[];
+    final lcExitList = <Map<String, dynamic>>[];
+    final absenceExitList = <Map<String, dynamic>>[];
+    final closingList = <Map<String, dynamic>>[];
+    if (fillRecordedAttendance) {
+      for (final student in students) {
+        final rawEntry = AttendanceLifecycle.parseEnrollmentDate(student) ??
+            DateTime(1900, 1, 1);
+        final entry = (first.month == 6 &&
+                rawEntry.year == first.year &&
+                rawEntry.month == 6 &&
+                rawEntry.day == 1)
+            ? DateTime(first.year, 5, 31)
+            : rawEntry;
+        final leaving = AttendanceLifecycle.parseLeavingDate(student);
+        if (!entry.isBefore(first) && !entry.isAfter(last)) {
+          admissionsList.add(student);
+        }
+        if (!entry.isAfter(last) &&
+            leaving != null &&
+            !leaving.isBefore(first) &&
+            !leaving.isAfter(last)) {
+          final reason = AttendanceLifecycle.parseExitReason(student);
+          if (AttendanceLifecycle.isContinuousAbsenceReason(reason)) {
+            absenceExitList.add(student);
+          } else {
+            lcExitList.add(student);
+          }
+        }
+        if (!entry.isAfter(last) && (leaving == null || leaving.isAfter(last))) {
+          closingList.add(student);
+        }
+      }
+    }
+
     final coverMetricRows = <List<String>>[
       singleGenderSchool
           ? _frontSingleMetricRow('ગયા માસને આખરે બાકી', openingGenderCounts, schoolType)
           : _frontMetricRow('ગયા માસને આખરે બાકી', openingGenderCounts, schoolType),
-      blankCoverMetricRow('ચાલુ માસમાં નવા આવેલ'),
-      blankCoverMetricRow('ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ'),
-      blankCoverMetricRow('સતત ગેરહાજરીથી નામ કમી કરેલ'),
-      blankCoverMetricRow('ચાલુ માસને આખરે બાકી'),
+      buildCoverMetricRow('ચાલુ માસમાં નવા આવેલ', admissionsList),
+      buildCoverMetricRow('ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ', lcExitList),
+      buildCoverMetricRow('સતત ગેરહાજરીથી નામ કમી કરેલ', absenceExitList),
+      buildCoverMetricRow('ચાલુ માસને આખરે બાકી', closingList),
     ];
 
     pw.Widget singleGenderCountTable() {
@@ -1217,11 +1337,37 @@ class SupabaseHajariPatrakService {
               singleGenderSchool ? singleGenderCountTable() : mixedGenderCountTable(),
               pw.SizedBox(height: 5),
               pw.Table.fromTextArray(
-                data: const <List<String>>[
-                  <String>['ગયા માસનાં અંત સુધીનાં કુલ કામનાં દિવસો:-', '', 'હાજરીની ટકાવારી :–', ''],
-                  <String>['ચાલુ માસને અંતે કુલ હાજર દિવસો', '', 'ચાલુ માસની સરાસરી હાજરી :-', ''],
-                  <String>['ચાલુ માસનાં કામનાં દિવસોઃ-', '', 'માસને અંતે કુલ કામનાં દિવસો :-', ''],
-                ],
+                data: () {
+                  if (!fillRecordedAttendance || recordedDays.isEmpty) {
+                    return const <List<String>>[
+                      <String>['ગયા માસનાં અંત સુધીનાં કુલ કામનાં દિવસો:-', '', 'હાજરીની ટકાવારી :–', ''],
+                      <String>['ચાલુ માસને અંતે કુલ હાજર દિવસો', '', 'ચાલુ માસની સરાસરી હાજરી :-', ''],
+                      <String>['ચાલુ માસનાં કામનાં દિવસોઃ-', '', 'માસને અંતે કુલ કામનાં દિવસો :-', ''],
+                    ];
+                  }
+                  final openDays = recordedDays.where((d) {
+                    final dt = DateTime(year, month, d);
+                    return dt.weekday != DateTime.sunday && !holidays.contains(_iso(dt));
+                  }).length;
+                  var monthPresentSum = 0;
+                  for (final m in studentDailyMarks.values) {
+                    for (final entry in m.entries) {
+                      final dt = DateTime(year, month, entry.key);
+                      if (dt.weekday == DateTime.sunday || holidays.contains(_iso(dt))) continue;
+                      if (entry.value['present'] == true) monthPresentSum++;
+                    }
+                  }
+                  final avgPres = openDays > 0 ? (monthPresentSum / openDays) : 0.0;
+                  final regTotal = (openingCategoryCounts['TOTAL'] ?? students.length);
+                  final pct = (openDays > 0 && regTotal > 0)
+                      ? ((monthPresentSum * 100.0) / (openDays * regTotal)).clamp(0.0, 100.0)
+                      : 0.0;
+                  return <List<String>>[
+                    <String>['ગયા માસનાં અંત સુધીનાં કુલ કામનાં દિવસો:-', '', 'હાજરીની ટકાવારી :–', openDays > 0 ? '${pct.toStringAsFixed(2)}%' : ''],
+                    <String>['ચાલુ માસને અંતે કુલ હાજર દિવસો', openDays > 0 ? '$monthPresentSum' : '', 'ચાલુ માસની સરાસરી હાજરી :-', openDays > 0 ? avgPres.toStringAsFixed(2) : ''],
+                    <String>['ચાલુ માસનાં કામનાં દિવસોઃ-', openDays > 0 ? '$openDays' : '', 'માસને અંતે કુલ કામનાં દિવસો :-', ''],
+                  ];
+                }(),
                 columnWidths: <int, pw.TableColumnWidth>{
                   // Match the merged-column proportions in the Excel master template:
                   // label, writing cell, label, writing cell.
@@ -1820,12 +1966,46 @@ class SupabaseHajariPatrakService {
           style: pw.TextStyle(font: emphasized ? boldFont : font, fontSize: 6.1)),
       );
 
+      final recordedPresCounts = <String, int>{'SC': 0, 'ST': 0, 'OBC': 0, 'OTHER': 0, 'TOTAL': 0, 'ABSENT': 0};
+      var recordedMdmTotal = 0;
+      var recordedBfTotal = 0;
+      var recordedOpenDays = 0;
+      if (fillRecordedAttendance && recordedDays.isNotEmpty) {
+        final openDayList = recordedDays.where((d) {
+          final dt = DateTime(year, month, d);
+          return !holidays.contains(_iso(dt));
+        }).toList();
+        recordedOpenDays = openDayList.length;
+        for (final st in allStudents) {
+          if (st['_is_blank_row'] == true) continue;
+          final sid = _text(st['id']);
+          final cat = _category(st['category']);
+          final marks = studentDailyMarks[sid];
+          for (final d in openDayList) {
+            final dm = marks?[d];
+            if (dm != null && dm['present'] == true) {
+              recordedPresCounts[cat] = (recordedPresCounts[cat] ?? 0) + 1;
+              recordedPresCounts['TOTAL'] = (recordedPresCounts['TOTAL'] ?? 0) + 1;
+              if (dm['mdm'] == true) recordedMdmTotal++;
+              if (dm['breakfast'] == true) recordedBfTotal++;
+            } else {
+              recordedPresCounts['ABSENT'] = (recordedPresCounts['ABSENT'] ?? 0) + 1;
+            }
+          }
+        }
+      }
+
       pw.Widget categoryBlock({required bool opening}) {
         final labels = <String>['અ.જા.', 'અ.જ.જા.', 'બ.પં.', 'અન્ય', 'કુલ', opening ? '' : 'ગેરહાજર'];
-        final keys = <String>['SC', 'ST', 'OBC', 'OTHER', 'TOTAL', ''];
+        final keys = <String>['SC', 'ST', 'OBC', 'OTHER', 'TOTAL', 'ABSENT'];
         final rows = <pw.TableRow>[];
         for (var i = 0; i < labels.length; i++) {
-          final value = opening && keys[i].isNotEmpty ? '${openingCounts[keys[i]] ?? 0}' : '';
+          String value = '';
+          if (opening && i < 5) {
+            value = '${openingCounts[keys[i]] ?? 0}';
+          } else if (!opening && fillRecordedAttendance && recordedOpenDays > 0) {
+            value = '${recordedPresCounts[keys[i]] ?? 0}';
+          }
           rows.add(pw.TableRow(children: <pw.Widget>[
             summaryCell(labels[i], emphasized: i == 4, left: true),
             summaryCell(value, emphasized: i == 4),
@@ -1841,7 +2021,7 @@ class SupabaseHajariPatrakService {
         );
       }
 
-      pw.Widget mealLine(String label) => pw.Table(
+      pw.Widget mealLine(String label, {String? recordedVal}) => pw.Table(
         columnWidths: <int, pw.TableColumnWidth>{
           0: const pw.FlexColumnWidth(3.0),
           1: const pw.FlexColumnWidth(2.0),
@@ -1853,7 +2033,11 @@ class SupabaseHajariPatrakService {
               alignment: pw.Alignment.centerLeft,
               child: pw.Text(label, maxLines: 1, style: pw.TextStyle(font: font, fontSize: 6.0))),
             pw.Container(height: 11, alignment: pw.Alignment.center,
-              child: pw.Text('____________________', maxLines: 1,
+              child: pw.Text(
+                (recordedVal != null && recordedVal.isNotEmpty)
+                    ? recordedVal
+                    : '____________________',
+                maxLines: 1,
                 style: pw.TextStyle(font: font, fontSize: 5.8))),
           ]),
         ],
@@ -1877,32 +2061,71 @@ class SupabaseHajariPatrakService {
             ],
           ),
           pw.SizedBox(height: 2),
-          mealLine('મધ્યાહ્ન ભોજનમાં ભાગ લીધેલ વિદ્યાર્થીઓની સંખ્યા'),
-          mealLine('અલ્પાહારમાં ભાગ લીધેલ વિદ્યાર્થીઓની સંખ્યા'),
+          mealLine(
+            'મધ્યાહ્ન ભોજનમાં ભાગ લીધેલ વિદ્યાર્થીઓની સંખ્યા',
+            recordedVal: fillRecordedAttendance && recordedOpenDays > 0 ? '$recordedMdmTotal' : null,
+          ),
+          mealLine(
+            'અલ્પાહારમાં ભાગ લીધેલ વિદ્યાર્થીઓની સંખ્યા',
+            recordedVal: fillRecordedAttendance && recordedOpenDays > 0 ? '$recordedBfTotal' : null,
+          ),
         ],
       );
     };
-    final attendanceFooter = pw.Table(
-      columnWidths: <int, pw.TableColumnWidth>{
-        0: const pw.FlexColumnWidth(2),
-        1: const pw.FlexColumnWidth(3),
-      },
-      border: pw.TableBorder.all(color: PdfColors.black, width: 0.45),
-      children: <pw.TableRow>[
-        pw.TableRow(children: <pw.Widget>[
-          pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.centerLeft,
-            child: pw.Text('હાજરી સરાસરી =', style: pw.TextStyle(font: font, fontSize: 7))),
-          pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.center,
-            child: pw.Text('____________ = ____________', style: pw.TextStyle(font: font, fontSize: 7))),
-        ]),
-        pw.TableRow(children: <pw.Widget>[
-          pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.centerLeft,
-            child: pw.Text('માધ્યાહ્ન ભોજન સરાસરી =', style: pw.TextStyle(font: font, fontSize: 7))),
-          pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.center,
-            child: pw.Text('____________ = ____________', style: pw.TextStyle(font: font, fontSize: 7))),
-        ]),
-      ],
-    );
+    final attendanceFooter = () {
+      String presFormula = '____________ = ____________';
+      String mdmFormula = '____________ = ____________';
+      if (fillRecordedAttendance && recordedDays.isNotEmpty) {
+        final openDaysCount = recordedDays.where((d) {
+          final dt = DateTime(year, month, d);
+          return !holidays.contains(_iso(dt));
+        }).length;
+        if (openDaysCount > 0) {
+          var totPres = 0;
+          var totMdm = 0;
+          for (final st in allStudents) {
+            if (st['_is_blank_row'] == true) continue;
+            final sid = _text(st['id']);
+            final marks = studentDailyMarks[sid];
+            if (marks == null) continue;
+            for (final d in recordedDays) {
+              final dt = DateTime(year, month, d);
+              if (holidays.contains(_iso(dt))) continue;
+              final dm = marks[d];
+              if (dm != null && dm['present'] == true) {
+                totPres++;
+                if (dm['mdm'] == true) totMdm++;
+              }
+            }
+          }
+          final avgP = (totPres / openDaysCount).toStringAsFixed(2);
+          final avgM = (totMdm / openDaysCount).toStringAsFixed(2);
+          presFormula = '$totPres / $openDaysCount = $avgP';
+          mdmFormula = '$totMdm / $openDaysCount = $avgM';
+        }
+      }
+      return pw.Table(
+        columnWidths: <int, pw.TableColumnWidth>{
+          0: const pw.FlexColumnWidth(2),
+          1: const pw.FlexColumnWidth(3),
+        },
+        border: pw.TableBorder.all(color: PdfColors.black, width: 0.45),
+        children: <pw.TableRow>[
+          pw.TableRow(children: <pw.Widget>[
+            pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.centerLeft,
+              child: pw.Text('હાજરી સરાસરી =', style: pw.TextStyle(font: font, fontSize: 7))),
+            pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.center,
+              child: pw.Text(presFormula, style: pw.TextStyle(font: font, fontSize: 7))),
+          ]),
+          pw.TableRow(children: <pw.Widget>[
+            pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.centerLeft,
+              child: pw.Text('માધ્યાહ્ન ભોજન સરાસરી =', style: pw.TextStyle(font: font, fontSize: 7))),
+            pw.Container(height: 22, padding: const pw.EdgeInsets.all(4), alignment: pw.Alignment.center,
+              child: pw.Text(mdmFormula, style: pw.TextStyle(font: font, fontSize: 7))),
+          ]),
+        ],
+      );
+    }();
 
     return pw.Page(
       pageFormat: PdfPageFormat.a4,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/supabase_school_access_service.dart';
 import 'developer_panel.dart';
@@ -10,10 +11,12 @@ class SupabasePlatformEntryScreen extends StatefulWidget {
   const SupabasePlatformEntryScreen({
     super.key,
     required this.onAuthenticated,
+    this.initialSchoolId = '',
     SupabaseSchoolAccessService? service,
   }) : _service = service;
 
   final ValueChanged<Map<String, dynamic>> onAuthenticated;
+  final String initialSchoolId;
   final SupabaseSchoolAccessService? _service;
 
   @override
@@ -199,6 +202,7 @@ class _SupabasePlatformEntryScreenState
       body: _SchoolLoginTab(
         service: service,
         onAuthenticated: widget.onAuthenticated,
+        initialSchoolId: widget.initialSchoolId,
         onUnlockDeveloper: _promptDeveloperKeyAndOpenPanel,
         onLogoTap: _handleSecretLogoTap,
       ),
@@ -210,11 +214,13 @@ class _SchoolLoginTab extends StatefulWidget {
   const _SchoolLoginTab({
     required this.service,
     required this.onAuthenticated,
+    this.initialSchoolId = '',
     this.onUnlockDeveloper,
     this.onLogoTap,
   });
   final SupabaseSchoolAccessService service;
   final ValueChanged<Map<String, dynamic>> onAuthenticated;
+  final String initialSchoolId;
   final VoidCallback? onUnlockDeveloper;
   final VoidCallback? onLogoTap;
 
@@ -223,6 +229,8 @@ class _SchoolLoginTab extends StatefulWidget {
 }
 
 class _SchoolLoginTabState extends State<_SchoolLoginTab> {
+  static const String _lastDiseCodePrefKey = 'psm_last_logged_in_dise_code_v1';
+
   final _schoolId = TextEditingController();
   final _password = TextEditingController();
   String? _teacherId;
@@ -232,6 +240,40 @@ class _SchoolLoginTabState extends State<_SchoolLoginTab> {
   bool _signingIn = false;
   bool _obscure = true;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = widget.initialSchoolId.trim();
+    if (initial.isNotEmpty) {
+      _schoolId.text = initial;
+    }
+    _restoreLastDiseCode();
+  }
+
+  Future<void> _restoreLastDiseCode() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = (prefs.getString(_lastDiseCodePrefKey) ?? '').trim();
+      if (!mounted || saved.isEmpty) return;
+      if (_schoolId.text.trim().isEmpty) {
+        setState(() {
+          _schoolId.text = saved;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistLastDiseCode(String schoolId) async {
+    final clean = schoolId.trim();
+    if (clean.isEmpty) return;
+    final upper = clean.toUpperCase();
+    if (upper == 'DEV' || upper == 'DEVELOPER' || upper == '#DEV#') return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_lastDiseCodePrefKey, clean);
+    } catch (_) {}
+  }
 
   @override
   void dispose() {
@@ -286,6 +328,7 @@ class _SchoolLoginTabState extends State<_SchoolLoginTab> {
                 )
                 .toList()
           : <Map<String, dynamic>>[];
+      await _persistLastDiseCode(schoolId);
       if (!mounted) return;
       setState(() {
         _school = school;
@@ -522,11 +565,13 @@ class _SchoolLoginTabState extends State<_SchoolLoginTab> {
       _error = null;
     });
     try {
+      final enteredSchoolId = _schoolId.text.trim();
       final profile = await widget.service.signInSchoolUser(
-        schoolId: _schoolId.text.trim(),
+        schoolId: enteredSchoolId,
         teacherId: _teacherId!,
         password: _password.text,
       );
+      await _persistLastDiseCode(enteredSchoolId);
       if (!mounted) return;
       await _showDuePopupsAfterLogin();
       if (!mounted) return;

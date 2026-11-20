@@ -64,6 +64,7 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
   DateTime _start = _todayDate();
   DateTime _end = _todayDate();
   List<Map<String, dynamic>> _requests = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _schoolActiveLeaves = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _teacherRoster = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _classRoster = <Map<String, dynamic>>[];
   Map<String, dynamic> _leaveRules = <String, dynamic>{
@@ -195,19 +196,106 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
   String _teacherRowName(Map<String, dynamic>? row, [String fallback = 'શિક્ષક']) =>
       _text(row?['teacher_name'] ?? row?['teacherName'] ?? row?['name'] ?? row?['full_name'], fallback);
 
+  List<Map<String, dynamic>> get _overlappingSchoolLeaves {
+    final startIso = _iso(_start);
+    final endIso = _iso(_end);
+    return _schoolActiveLeaves.where((row) {
+      final status = _text(row['status'], 'pending').toLowerCase();
+      if (status != 'pending' && status != 'approved') return false;
+      final lStart = _text(row['start_date']);
+      final lEnd = _text(row['end_date'], lStart);
+      if (lStart.isEmpty || lEnd.isEmpty) return false;
+      return lStart.compareTo(endIso) <= 0 && lEnd.compareTo(startIso) >= 0;
+    }).toList();
+  }
+
+  String _resolveLeaveChargeTeacherId(Map<String, dynamic> row) {
+    final data = _leaveData(row);
+    final cid = _text(row['charge_teacher_id'], _text(data['charge_teacher_id']));
+    if (cid.isNotEmpty) return cid;
+    final cname = _text(
+      row['charge_teacher_name'],
+      _text(data['charge_teacher_name']),
+    ).toLowerCase();
+    if (cname.isEmpty) return '';
+    for (final t in _teacherRoster) {
+      if (_teacherRowName(t, '').toLowerCase() == cname) {
+        return _teacherRowId(t);
+      }
+    }
+    return '';
+  }
+
+  /// Returns all teachers whose class charge is held (directly or transitively)
+  /// by the current teacher [_teacherId] during the selected [_start.._end] range.
+  List<Map<String, dynamic>> get _incomingChargeLeavesForMe {
+    final myId = _text(_teacherId);
+    if (myId.isEmpty) return const <Map<String, dynamic>>[];
+    final overlapping = _overlappingSchoolLeaves;
+    final byChargeTid = <String, List<Map<String, dynamic>>>{};
+    for (final l in overlapping) {
+      final onLeaveTid = _text(l['teacher_id']);
+      final chargeTid = _resolveLeaveChargeTeacherId(l);
+      if (onLeaveTid.isEmpty || chargeTid.isEmpty || onLeaveTid == chargeTid) {
+        continue;
+      }
+      byChargeTid.putIfAbsent(chargeTid, () => <Map<String, dynamic>>[]).add(l);
+    }
+    final result = <Map<String, dynamic>>[];
+    final visited = <String>{myId};
+    final queue = <String>[myId];
+    while (queue.isNotEmpty) {
+      final cur = queue.removeAt(0);
+      final incoming = byChargeTid[cur] ?? const <Map<String, dynamic>>[];
+      for (final l in incoming) {
+        final onLeaveTid = _text(l['teacher_id']);
+        if (onLeaveTid.isEmpty || !visited.add(onLeaveTid)) continue;
+        result.add(l);
+        queue.add(onLeaveTid);
+      }
+    }
+    return result;
+  }
+
+  /// Maps teacherId -> reason why that teacher cannot be chosen as In-Charge
+  /// during the selected [_start.._end] period (already on leave or gave charge to me).
+  Map<String, String> get _unavailableChargeTeacherReasons {
+    final reasons = <String, String>{};
+    final incomingIds = <String>{
+      for (final l in _incomingChargeLeavesForMe) _text(l['teacher_id']),
+    };
+    for (final l in _overlappingSchoolLeaves) {
+      final tid = _text(l['teacher_id']);
+      if (tid.isEmpty || tid == _teacherId) continue;
+      if (incomingIds.contains(tid)) {
+        reasons[tid] = 'આ તારીખે રજા પર છે અને તેમનો ચાર્જ તમારી પાસે છે';
+      } else {
+        reasons[tid] =
+            'આ તારીખે રજા પર છે (${_text(l['start_date'])} થી ${_text(l['end_date'])})';
+      }
+    }
+    return reasons;
+  }
+
   List<Map<String, dynamic>> get _chargeTeacherOptions {
+    final unavailable = _unavailableChargeTeacherReasons;
     final eligible = _teacherRoster.where((row) {
       final id = _teacherRowId(row);
       final role = _text(row['role']).toLowerCase();
       final active = _text(row['is_active'] ?? row['active'], 'true').toLowerCase();
-      return id.isNotEmpty && _teacherRowName(row, '').isNotEmpty &&
+      return id.isNotEmpty &&
+          _teacherRowName(row, '').isNotEmpty &&
           !const ['admin', 'developer'].contains(role) &&
           !const ['false', '0', 'inactive', 'blocked'].contains(active);
     }).toList();
-    final otherTeachers = eligible.where((row) => _teacherRowId(row) != _teacherId).toList();
-    // If the roster truly contains only one active teacher, still render a
-    // selectable value instead of a mysteriously disabled dropdown.
-    return otherTeachers.isNotEmpty ? otherTeachers : eligible;
+    final otherTeachers = eligible
+        .where(
+          (row) =>
+              _teacherRowId(row) != _teacherId &&
+              !unavailable.containsKey(_teacherRowId(row)),
+        )
+        .toList();
+    return otherTeachers;
   }
 
   bool get _isCl => _leaveType.toLowerCase() == 'cl' || _leaveType.toLowerCase().contains('(cl)') || _leaveType.contains('પ્રાસંગિક');
@@ -346,6 +434,12 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
           .select('id,school_ref,teacher_id,start_date,end_date,leave_type,reason,status,decision_note,leave_data,record_source,recorded_by,created_at,updated_at')
           .eq('school_ref', school)
           .order('start_date', ascending: false);
+      List<Map<String, dynamic>> schoolActiveLeaves = <Map<String, dynamic>>[];
+      try {
+        schoolActiveLeaves = _rowsFromRpc(
+          await _client.rpc('psm_school_active_leave_charges'),
+        );
+      } catch (_) {}
       Map<String, dynamic> rules = Map<String, dynamic>.from(_leaveRules);
       try {
         final ruleRow = await _client.from('school_leave_settings').select(
@@ -390,10 +484,15 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
         _teacherRoster = roster;
         _classRoster = classes;
         _leaveRules = rules;
-        if (!_teacherRoster.any((row) => _teacherRowId(row) == _selectedChargeTeacherId)) {
+        _requests = raw.map((row) => Map<String, dynamic>.from(row)).toList();
+        _schoolActiveLeaves = schoolActiveLeaves.isNotEmpty
+            ? schoolActiveLeaves
+            : _requests;
+        if (!_chargeTeacherOptions.any(
+          (row) => _teacherRowId(row) == _selectedChargeTeacherId,
+        )) {
           _selectedChargeTeacherId = null;
         }
-        _requests = raw.map((row) => Map<String, dynamic>.from(row)).toList();
         _selectedIds.removeWhere((id) => !_requests.any((row) => _text(row['id']) == id));
         _loading = false;
       });
@@ -422,6 +521,11 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
       } else {
         _end = picked;
         if (_end.isBefore(_start)) _start = _end;
+      }
+      if (!_chargeTeacherOptions.any(
+        (row) => _teacherRowId(row) == _selectedChargeTeacherId,
+      )) {
+        _selectedChargeTeacherId = null;
       }
     });
   }
@@ -468,12 +572,29 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
         'leave_type': _leaveType,
         'reason': _finalReason,
         'status': 'pending',
+        'teacher_decision_notified': false,
         'leave_data': <String, dynamic>{
           'teacher_name': _teacherName,
           'teacher_class': _teacherClass,
           'charge_teacher_id': _selectedChargeTeacherId,
           'charge_teacher_name': _chargeTeacherName,
           'charge_teacher_class': _chargeTeacherClass,
+          if (_incomingChargeLeavesForMe.isNotEmpty)
+            'delegated_from_teacher_ids': _incomingChargeLeavesForMe
+                .map((l) => _text(l['teacher_id']))
+                .where((s) => s.isNotEmpty)
+                .toList(),
+          if (_incomingChargeLeavesForMe.isNotEmpty)
+            'delegated_from_teacher_names': _incomingChargeLeavesForMe
+                .map((l) {
+                  final tid = _text(l['teacher_id']);
+                  return _text(
+                    l['teacher_name'],
+                    _teacherRowName(_findTeacher(tid)),
+                  );
+                })
+                .where((s) => s.isNotEmpty)
+                .toList(),
           'class_teacher_name': _classesForTeacher(teacher).isNotEmpty ? _teacherName : '',
           'class_teacher_class': _classesForTeacher(teacher).isNotEmpty ? _teacherClass : '',
           'reason_preset': _selectedReason,
@@ -534,6 +655,181 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
     }
     resolved['leave_data'] = data;
     return resolved;
+  }
+
+  Future<void> _adminDeleteLeaveWithPassword(
+    Map<String, dynamic> request,
+  ) async {
+    final id = _text(request['id']);
+    if (!_isAdmin || widget.readOnly || id.isEmpty) return;
+    final data = _leaveData(request);
+    final teacherName = _text(
+      data['teacher_name'],
+      _teacherRowName(_findTeacher(_text(request['teacher_id']))),
+    );
+    final leaveType = _text(request['leave_type'], 'રજા');
+    final startDate = _text(request['start_date']);
+    final endDate = _text(request['end_date'], startDate);
+    final days = _daysLabel(SupabaseLeavePdfService.totalDays(request));
+    final statusText = _statusLabel(request['status']);
+
+    final pwdCtrl = TextEditingController();
+    var obscure = true;
+    var submitting = false;
+    String? dialogError;
+
+    final deleted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          Future<void> confirmDelete() async {
+            final pwd = pwdCtrl.text.trim();
+            if (pwd.isEmpty) {
+              setDialogState(
+                () => dialogError = 'કૃપા કરીને School Admin પાસવર્ડ દાખલ કરો.',
+              );
+              return;
+            }
+            setDialogState(() {
+              submitting = true;
+              dialogError = null;
+            });
+            try {
+              await _client.rpc(
+                'psm_admin_delete_leave_with_password',
+                params: <String, dynamic>{
+                  'p_leave_id': id,
+                  'p_admin_password': pwd,
+                },
+              );
+              if (dialogContext.mounted) {
+                Navigator.of(dialogContext).pop(true);
+              }
+            } catch (e) {
+              setDialogState(() {
+                submitting = false;
+                dialogError = _cleanError(e);
+              });
+            }
+          }
+
+          return AlertDialog(
+            title: Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.red.shade700),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('રજા રેકોર્ડ કાયમ માટે કાઢી નાખવો?'),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 480,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'શિક્ષક: $teacherName\n'
+                      'રજા: $leaveType ($statusText)\n'
+                      'તારીખ: $startDate થી $endDate ($days દિવસ)',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade50,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.red.shade300),
+                      ),
+                      child: Text(
+                        '⚠️ મહત્વપૂર્ણ ચેતવણી (Important Warning):\n'
+                        '• આ રજા તમામ રેકોર્ડ અને રિપોર્ટમાંથી કાયમ માટે દૂર થશે.\n'
+                        '• આ રજા શિક્ષકની વપરાયેલી રજા (Utilised Leave — C.L. / મરજિયાત / વળતર) માંથી પણ બાદ થઈ જશે (એટલે કે વપરાયેલી રજામાં ગણાશે નહીં).\n'
+                        '• આ ક્રિયા પાછી ફેરવી શકાશે નહીં.',
+                        style: TextStyle(
+                          color: Colors.red.shade900,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: pwdCtrl,
+                      obscureText: obscure,
+                      autofocus: true,
+                      enabled: !submitting,
+                      decoration: InputDecoration(
+                        labelText: 'School Admin પાસવર્ડ દાખલ કરો',
+                        border: const OutlineInputBorder(),
+                        prefixIcon: const Icon(Icons.lock_outline),
+                        errorText: dialogError,
+                        suffixIcon: IconButton(
+                          onPressed: () =>
+                              setDialogState(() => obscure = !obscure),
+                          icon: Icon(
+                            obscure
+                                ? Icons.visibility_outlined
+                                : Icons.visibility_off_outlined,
+                          ),
+                        ),
+                      ),
+                      onSubmitted: (_) => confirmDelete(),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: submitting
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(false),
+                child: const Text('રદ કરો'),
+              ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red.shade700,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: submitting ? null : confirmDelete,
+                icon: submitting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.delete_forever_outlined),
+                label: Text(
+                  submitting ? 'કાઢી રહ્યું છે…' : 'પાસવર્ડથી રજા કાઢી નાખો',
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    pwdCtrl.dispose();
+    if (deleted == true) {
+      await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'રજાનો રેકોર્ડ તમામ રજીસ્ટર અને વપરાયેલી રજામાંથી કાયમ માટે કાઢી નાખવામાં આવ્યો છે.',
+            ),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _deletePendingRequest(Map<String, dynamic> request) async {
@@ -707,10 +1003,55 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
               }).toList(),
               onChanged: _chargeTeacherOptions.isEmpty ? null : (value) => setState(() { _selectedChargeTeacherId = value; _error = null; }),
             ),
+            if (_incomingChargeLeavesForMe.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEFF6FF),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFF93C5FD)),
+                  ),
+                  child: Text(
+                    '🔗 ચાર્જ ટ્રાન્સફર નોંધ (Chain In-Charge): આ તારીખે તમારી પાસે ${_incomingChargeLeavesForMe.map((l) { final tid = _text(l['teacher_id']); final tName = _text(l['teacher_name'], _teacherRowName(_findTeacher(tid))); final tCls = _teacherClassesLabel(tid, _findTeacher(tid)); return '$tName ($tCls)'; }).join(', ')} નો વર્ગ ચાર્જ છે. તમે રજા પર જઈને જે શિક્ષકને ચાર્જ સોંપશો, તેમને તમારા વર્ગ ($_teacherClass) ઉપરાંત તે વર્ગની હાજરી પૂરવાનો અધિકાર પણ આપોઆપ મળી જશે.',
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF1E3A8A),
+                    ),
+                  ),
+                ),
+              ),
+            if (_unavailableChargeTeacherReasons.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFFBEB),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFFFCD34D)),
+                  ),
+                  child: Text(
+                    '🚫 આ તારીખે રજા પર હોવાથી ચાર્જ આપી શકાશે નહીં: ${_unavailableChargeTeacherReasons.entries.map((e) { final t = _findTeacher(e.key); final name = _teacherRowName(t); final cls = _teacherClassesLabel(e.key, t); return '$name ($cls — ${e.value})'; }).join(' • ')}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF92400E),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
             if (_chargeTeacherOptions.isEmpty)
-              const Padding(
-                padding: EdgeInsets.only(top: 6),
-                child: Text('સક્રિય શિક્ષક યાદી મળી નથી. Admin Setup માં શિક્ષક ખાતાં સક્રિય છે કે નહીં તપાસી રિફ્રેશ કરો.'),
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  _unavailableChargeTeacherReasons.isNotEmpty
+                      ? 'આ તારીખે અન્ય તમામ શિક્ષકો રજા પર હોવાથી ચાર્જ સોંપવા માટે કોઈ શિક્ષક ઉપલબ્ધ નથી.'
+                      : 'સક્રિય શિક્ષક યાદી મળી નથી. Admin Setup માં શિક્ષક ખાતાં સક્રિય છે કે નહીં તપાસી રિફ્રેશ કરો.',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
               ),
             const SizedBox(height: 8),
             InputDecorator(
@@ -762,7 +1103,16 @@ class _SupabaseTeacherLeaveScreenState extends State<SupabaseTeacherLeaveScreen>
                 title: Row(
                   children: [
                     Expanded(child: Text('${request['leave_type'] ?? ''} • ${_statusLabel(request['status'])}')),
-                    if (!_isAdmin && !widget.readOnly && _text(request['status']).toLowerCase() == 'pending')
+                    if (_isAdmin && !widget.readOnly)
+                      IconButton(
+                        tooltip: 'Admin પાસવર્ડથી રજા રેકોર્ડ કાઢી નાખો',
+                        onPressed: () => _adminDeleteLeaveWithPassword(request),
+                        icon: Icon(
+                          Icons.delete_forever_outlined,
+                          color: Colors.red.shade700,
+                        ),
+                      )
+                    else if (!_isAdmin && !widget.readOnly && _text(request['status']).toLowerCase() == 'pending')
                       IconButton(
                         tooltip: 'મંજૂરી બાકી અરજી કાઢી નાખો',
                         onPressed: () => _deletePendingRequest(request),

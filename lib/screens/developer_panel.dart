@@ -12,8 +12,12 @@ import '../services/template_print/template_print_service.dart';
 import '../services/datewise_report_columns.dart';
 import '../services/psm_file_export_helper.dart';
 import '../services/school_class_order.dart';
+import '../services/school_name_language_service.dart';
 import '../services/supabase_report_export_service.dart';
 import '../services/supabase_school_access_service.dart';
+import 'admin_workflow_panel.dart';
+import 'supabase_admin_center_screen.dart';
+import 'supabase_signed_in_home.dart';
 
 /// Platform Developer tab. Developer authority is checked by the Edge Function
 /// against the server-only PSM_DEVELOPER_KEY; no privileged Supabase key is in Flutter.
@@ -63,12 +67,14 @@ class _DeveloperPanelState extends State<DeveloperPanel>
   List<Map<String, dynamic>> _sharedFiles = <Map<String, dynamic>>[];
   final _sharedFileTitleController = TextEditingController();
   final _sharedFileDescController = TextEditingController();
+  DateTime _sharedFileDisplayDate = DateTime.now();
   Map<String, dynamic> _usage = <String, dynamic>{};
   List<Map<String, dynamic>> _bulkPreview = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _bulkResults = <Map<String, dynamic>>[];
   /// New-school requests sent from the login screen, waiting for approval.
   List<Map<String, dynamic>> _regRequests = <Map<String, dynamic>>[];
   bool _regLoading = false;
+  bool _operatingSchoolAdmin = false;
 
   static const _schoolTypes = <String, String>{
     'boys': 'કુમાર શાળા',
@@ -77,6 +83,7 @@ class _DeveloperPanelState extends State<DeveloperPanel>
   };
 
   void _autoLockAndCloseOnHide() {
+    if (_operatingSchoolAdmin) return;
     _developerKeyController.clear();
     if (!mounted) return;
     setState(() {
@@ -482,85 +489,106 @@ class _DeveloperPanelState extends State<DeveloperPanel>
     );
   }
 
+  String _normDigits(String raw) {
+    const guj = '૦૧૨૩૪૫૬૭૮૯';
+    var s = raw.trim();
+    for (var i = 0; i < guj.length; i++) {
+      s = s.replaceAll(guj[i], '$i');
+    }
+    return s;
+  }
+
   Future<void> _deleteSchool(Map<String, dynamic> school) async {
     final confirm = TextEditingController();
+    final rawSchoolId = '${school['school_id'] ?? school['udise_code'] ?? school['dise_code'] ?? ''}'.trim();
+    final expectedNorm = _normDigits(rawSchoolId);
+    final schoolTitle = '${school['school_name_gu'] ?? school['school_name_en'] ?? school['school_name'] ?? 'School'}'.trim();
+
     final approved = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Permanently delete school?'),
-        content: SizedBox(
-          width: 440,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'This permanently deletes ${school['school_name']} and ALL its data from the server: teachers and logins, classes, students, attendance, results, leave, library, Rojmel, files, settings and its registration request. Export a directory/backup first. This cannot be undone.',
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          final typedNorm = _normDigits(confirm.text);
+          final isMatch = expectedNorm.isNotEmpty
+              ? (typedNorm == expectedNorm || typedNorm.toUpperCase() == 'DELETE')
+              : typedNorm.isNotEmpty;
+          return AlertDialog(
+            title: const Text('Permanently delete school? / શાળા કાયમી ડિલીટ કરો?'),
+            content: SizedBox(
+              width: 460,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'This permanently deletes "$schoolTitle" and ALL its data from the server: teachers and logins, classes, students, attendance, results, leave, library, Rojmel, files, settings and its registration request. Automatic Excel backups will be downloaded before deletion.',
+                  ),
+                  const SizedBox(height: 12),
+                  SelectableText(
+                    expectedNorm.isNotEmpty
+                        ? 'Type the DISE number $rawSchoolId (or DELETE) to confirm:'
+                        : 'Type DELETE to confirm:',
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: confirm,
+                    onChanged: (_) => setDialogState(() {}),
+                    decoration: InputDecoration(
+                      labelText: expectedNorm.isNotEmpty
+                          ? 'Confirm DISE number ($rawSchoolId) or DELETE'
+                          : 'Type DELETE',
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              Text(
-                'Type the exact DISE number ${school['school_id']} to confirm.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel'),
               ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: confirm,
-                decoration: const InputDecoration(
-                  labelText: 'Confirm DISE number',
-                  border: OutlineInputBorder(),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(dialogContext).colorScheme.error,
                 ),
+                onPressed: isMatch
+                    ? () => Navigator.pop(dialogContext, true)
+                    : null,
+                icon: const Icon(Icons.delete_forever_outlined),
+                label: const Text('Permanently delete'),
               ),
             ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
-            ),
-            onPressed: () => Navigator.pop(
-              dialogContext,
-              confirm.text.trim() == '${school['school_id']}',
-            ),
-            child: const Text('Permanently delete'),
-          ),
-        ],
+          );
+        },
       ),
     );
-    final typed = confirm.text.trim();
+    final typed = _normDigits(confirm.text);
     confirm.dispose();
-    if (approved != true) {
-      if (typed.isNotEmpty)
-        _message(
-          'Delete was cancelled: DISE number did not match.',
-          isError: true,
-        );
-      return;
-    }
+    if (approved != true) return;
     await _runSchoolAction(() async {
       // Backups are best effort: a failed download must not block the delete.
       try {
         await _downloadLibraryBooksBackupBeforeDelete(
           schoolRef: '${school['id']}',
-          schoolId: typed,
-          schoolName:
-              '${school['school_name_gu'] ?? school['school_name_en'] ?? school['school_name'] ?? 'School'}',
+          schoolId: expectedNorm.isNotEmpty ? expectedNorm : typed,
+          schoolName: schoolTitle,
         );
         await _downloadAttendanceBackupBeforeDelete(
           schoolRef: '${school['id']}',
-          schoolId: typed,
-          schoolName:
-              '${school['school_name_gu'] ?? school['school_name_en'] ?? school['school_name'] ?? 'School'}',
+          schoolId: expectedNorm.isNotEmpty ? expectedNorm : typed,
+          schoolName: schoolTitle,
         );
       } catch (_) {}
       await _service.developerDeleteSchool(
         developerKey: _developerKeyController.text.trim(),
         schoolRef: '${school['id']}',
-        confirmSchoolId: typed,
+        confirmSchoolId: expectedNorm.isNotEmpty ? expectedNorm : typed,
       );
+      if (mounted) {
+        _message('School "$schoolTitle" and all associated records deleted permanently.');
+      }
     });
   }
 
@@ -1542,6 +1570,7 @@ class _DeveloperPanelState extends State<DeveloperPanel>
         'txt' => 'text/plain',
         _ => 'application/octet-stream',
       };
+      final displayDateIso = _dateIso(_sharedFileDisplayDate);
       await _service.developerUploadSharedFile(
         developerKey: _developerKeyController.text.trim(),
         fileName: fileName,
@@ -1550,13 +1579,15 @@ class _DeveloperPanelState extends State<DeveloperPanel>
         mimeType: mime,
         base64Data: base64Encode(bytes),
         sizeBytes: bytes.length,
+        displayDate: displayDateIso,
       );
       _sharedFileTitleController.clear();
       _sharedFileDescController.clear();
       await _loadDeveloperSharedFiles(silent: true);
+      await _loadUsage(silent: true);
       if (mounted) {
         _message(
-          'File "$fileName" uploaded & shared with School Admins. It will stay available until you delete it.',
+          'File "$fileName" uploaded for display until $displayDateIso. It will automatically delete from Cloud Storage after $displayDateIso.',
         );
       }
     } catch (error) {
@@ -1913,6 +1944,43 @@ class _DeveloperPanelState extends State<DeveloperPanel>
     );
   }
 
+  Future<void> _purgeCloudStorageNow({bool deleteAllSharedFiles = false}) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final res = await _service.developerPurgeExpiredCloudData(
+        developerKey: _developerKeyController.text.trim(),
+        deleteAllSharedFiles: deleteAllSharedFiles,
+      );
+      final stats = res['stats'] is Map
+          ? Map<String, dynamic>.from(res['stats'] as Map)
+          : <String, dynamic>{};
+      await Future.wait(<Future<void>>[
+        _loadDeveloperSharedFiles(silent: true),
+        _loadDeveloperMessages(silent: true),
+        _loadUsage(silent: true),
+      ]);
+      if (mounted) {
+        final devFiles = stats['deleted_developer_shared_files'] ?? 0;
+        final devMsgs = stats['deleted_developer_messages'] ?? 0;
+        final dismissals = stats['deleted_message_dismissals'] ?? 0;
+        final adminMsgs = stats['deleted_school_admin_messages'] ?? 0;
+        final schoolFiles = stats['deleted_school_shared_files'] ?? 0;
+        _message(
+          'Cloud Cleanup Complete: Deleted $devFiles Developer File(s), $devMsgs Dev Message(s), $dismissals Dismissal(s), $adminMsgs Expired Admin Message(s), $schoolFiles Temp Share(s).',
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        _message('Cloud cleanup failed: $error', isError: true);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Widget _developerSharedFilesCard() {
     return Card(
       child: Padding(
@@ -1926,7 +1994,7 @@ class _DeveloperPanelState extends State<DeveloperPanel>
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
-                    'Developer File Share (ડેવલપર ફાઈલ શેર — Admin Download)',
+                    'Developer File Share (ડેવલપર ફાઈલ શેર — Auto-Delete After Date)',
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -1939,7 +2007,7 @@ class _DeveloperPanelState extends State<DeveloperPanel>
             ),
             const SizedBox(height: 6),
             const Text(
-              'Share any file with all School Admins. The file stays available until you delete it. In the Admin screen, the download tab is shown automatically only when at least one file is shared, and hidden when empty. Deleting a file also deletes it from Cloud Storage.',
+              'Share any file with all School Admins. Every shared file, Developer message, dismissal record, and School Admin message is automatically deleted from Cloud Storage once its display date has passed.',
             ),
             const SizedBox(height: 12),
             TextField(
@@ -1962,6 +2030,37 @@ class _DeveloperPanelState extends State<DeveloperPanel>
                 isDense: true,
               ),
             ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _busy
+                      ? null
+                      : () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: _sharedFileDisplayDate,
+                            firstDate: DateTime.now().subtract(
+                              const Duration(days: 1),
+                            ),
+                            lastDate: DateTime.now().add(
+                              const Duration(days: 365),
+                            ),
+                          );
+                          if (picked != null && mounted) {
+                            setState(() => _sharedFileDisplayDate = picked);
+                          }
+                        },
+                  icon: const Icon(Icons.event_available_outlined),
+                  label: Text(
+                    'Display Until Date (આ તારીખ પછી ઓટો-ડિલીટ): ${_dateIso(_sharedFileDisplayDate)}',
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 10),
             SizedBox(
               width: double.infinity,
@@ -1970,6 +2069,33 @@ class _DeveloperPanelState extends State<DeveloperPanel>
                 icon: const Icon(Icons.upload_file),
                 label: const Text('Select & Upload File for Admins'),
               ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _busy
+                      ? null
+                      : () => _purgeCloudStorageNow(deleteAllSharedFiles: false),
+                  icon: const Icon(Icons.cleaning_services_outlined),
+                  label: const Text(
+                    'Clean Expired Cloud Files, Dismissals & Old Messages Now',
+                  ),
+                ),
+                if (_sharedFiles.isNotEmpty)
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.red.shade700,
+                    ),
+                    onPressed: _busy
+                        ? null
+                        : () => _purgeCloudStorageNow(deleteAllSharedFiles: true),
+                    icon: const Icon(Icons.delete_sweep_outlined),
+                    label: const Text('Delete All Shared Files Now'),
+                  ),
+              ],
             ),
             const Divider(height: 24),
             Text(
@@ -1992,7 +2118,7 @@ class _DeveloperPanelState extends State<DeveloperPanel>
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
                 subtitle: Text(
-                  '${f['file_name'] ?? ''} • ${_prettyBytes(f['size_bytes'])} • ${_dateDisplay(f['created_at'])}${'${f['description'] ?? ''}'.trim().isNotEmpty ? '\n${f['description']}' : ''}',
+                  '${f['file_name'] ?? ''} • ${_prettyBytes(f['size_bytes'])} • Display Date: ${_dateDisplay(f['display_date'] ?? f['created_at'])} (Auto-delete after date)${'${f['description'] ?? ''}'.trim().isNotEmpty ? '\n${f['description']}' : ''}',
                 ),
                 isThreeLine: '${f['description'] ?? ''}'.trim().isNotEmpty,
                 trailing: IconButton(
@@ -3445,12 +3571,388 @@ class _DeveloperPanelState extends State<DeveloperPanel>
     }
   }
 
+  Future<void> _configureSchoolModules(Map<String, dynamic> school) async {
+    final schoolName =
+        '${school['school_name_gu'] ?? school['school_name_en'] ?? school['school_name'] ?? ''}'
+            .trim();
+    final schoolId = '${school['school_id'] ?? ''}'.trim();
+    final initialDisabled = SchoolModuleRegistry.extractDisabledModules(school);
+    final disabledSet = <String>{...initialDisabled};
+    var searchQuery = '';
+
+    final savedDisabled = await showDialog<List<String>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            final totalCount = SchoolModuleRegistry.allModules.length;
+            final enabledCount = totalCount - disabledSet.length;
+            final q = searchQuery.trim().toLowerCase();
+
+            void enableOnly(Iterable<String> keysToEnable) {
+              final allow = keysToEnable.map((e) => e.toLowerCase()).toSet();
+              setDialogState(() {
+                disabledSet
+                  ..clear()
+                  ..addAll(
+                    SchoolModuleRegistry.allKnownKeys.where(
+                      (k) => !allow.contains(k),
+                    ),
+                  );
+              });
+            }
+
+            return AlertDialog(
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.extension_rounded, color: Color(0xFF1D4ED8)),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'School Module Access Control / શાળા મોડ્યુલ પરવાનગી',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 17,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '$schoolName (DISE: $schoolId) • Enabled: $enabledCount / $totalCount Modules',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(ctx).colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 680,
+                height: 540,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFEFF6FF),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFBFDBFE)),
+                      ),
+                      child: const Text(
+                        '💡 ડિફોલ્ટ રૂપે બધા જ મોડ્યુલ (અને ભવિષ્યમાં ઉમેરાતા નવા મોડ્યુલ) ચાલુ રહેશે. તમે શાળા મુજબ બધા, માત્ર ૧, ૨, ૩ કે પસંદગીના મોડ્યુલ ચાલુ રાખી શકો છો.',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: Color(0xFF1E3A8A),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        FilledButton.tonalIcon(
+                          onPressed: () =>
+                              setDialogState(() => disabledSet.clear()),
+                          icon: const Icon(Icons.check_circle_outline, size: 16),
+                          label: const Text('Enable All (બધા ચાલુ)'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => setDialogState(() {
+                            disabledSet
+                              ..clear()
+                              ..addAll(SchoolModuleRegistry.allKnownKeys);
+                          }),
+                          icon: const Icon(Icons.cancel_outlined, size: 16),
+                          label: const Text('Disable All (બધા બંધ — પસંદ કરવા)'),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(Icons.fact_check_outlined, size: 16),
+                          label: const Text('Only Attendance & Reports'),
+                          onPressed: () => enableOnly(const <String>[
+                            'attendance',
+                            'reports',
+                            'hajari_patrak',
+                            'parent_message',
+                            'most_present',
+                            'leave',
+                            'daily_dashboard',
+                            'attendance_permission',
+                          ]),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(
+                            Icons.account_balance_wallet_outlined,
+                            size: 16,
+                          ),
+                          label: const Text('Only Rojmel & Audit'),
+                          onPressed: () => enableOnly(const <String>['rojmel']),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(Icons.assessment_outlined, size: 16),
+                          label: const Text('Only Result & Certificates'),
+                          onPressed: () => enableOnly(const <String>[
+                            'student_search',
+                            'student_management',
+                            'result',
+                            'result_summary',
+                            'bonafide',
+                            'leaving_certificate',
+                            'id_card',
+                          ]),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      decoration: InputDecoration(
+                        isDense: true,
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        hintText: 'Search module / મોડ્યુલ શોધો...',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      onChanged: (v) => setDialogState(() => searchQuery = v),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: ListView(
+                        children: [
+                          for (final grp in SchoolModuleRegistry.groups) ...[
+                            Builder(
+                              builder: (ctx) {
+                                final grpModules = SchoolModuleRegistry
+                                    .allModules
+                                    .where((m) {
+                                      if (m.group != grp.$1) return false;
+                                      if (q.isEmpty) return true;
+                                      return '${m.titleEn} ${m.titleGu} ${m.subtitle} ${m.key}'
+                                          .toLowerCase()
+                                          .contains(q);
+                                    })
+                                    .toList();
+                                if (grpModules.isEmpty) {
+                                  return const SizedBox.shrink();
+                                }
+                                final allGroupEnabled = grpModules.every(
+                                  (m) => !disabledSet.contains(m.key),
+                                );
+                                return Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    Container(
+                                      margin: const EdgeInsets.only(
+                                        top: 8,
+                                        bottom: 4,
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 6,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Theme.of(ctx)
+                                            .colorScheme
+                                            .surfaceContainerHighest,
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              grp.$2,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w800,
+                                                fontSize: 13.5,
+                                              ),
+                                            ),
+                                          ),
+                                          TextButton(
+                                            onPressed: () {
+                                              setDialogState(() {
+                                                if (allGroupEnabled) {
+                                                  for (final m in grpModules) {
+                                                    disabledSet.add(m.key);
+                                                  }
+                                                } else {
+                                                  for (final m in grpModules) {
+                                                    disabledSet.remove(m.key);
+                                                  }
+                                                }
+                                              });
+                                            },
+                                            child: Text(
+                                              allGroupEnabled
+                                                  ? 'Unselect Group'
+                                                  : 'Select Group',
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    for (final m in grpModules)
+                                      CheckboxListTile(
+                                        dense: true,
+                                        controlAffinity:
+                                            ListTileControlAffinity.leading,
+                                        value: !disabledSet.contains(m.key),
+                                        onChanged: (checked) {
+                                          setDialogState(() {
+                                            if (checked == true) {
+                                              disabledSet.remove(m.key);
+                                            } else {
+                                              disabledSet.add(m.key);
+                                            }
+                                          });
+                                        },
+                                        title: Text(
+                                          m.displayTitle,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 13.5,
+                                            color: disabledSet.contains(m.key)
+                                                ? Colors.grey.shade600
+                                                : null,
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          m.subtitle,
+                                          style: const TextStyle(fontSize: 12),
+                                        ),
+                                      ),
+                                  ],
+                                );
+                              },
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  onPressed: () {
+                    final sorted = disabledSet.toList()..sort();
+                    Navigator.of(dialogContext).pop(sorted);
+                  },
+                  icon: const Icon(Icons.save_rounded),
+                  label: Text(
+                    'Save ($enabledCount/$totalCount Enabled)',
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (savedDisabled == null) return;
+    await _runSchoolAction(
+      () => _service.developerSetSchoolModules(
+        developerKey: _developerKeyController.text.trim(),
+        schoolRef: '${school['id']}',
+        disabledModules: savedDisabled,
+      ),
+    );
+    if (mounted) {
+      final totalCount = SchoolModuleRegistry.allModules.length;
+      final enabledCount = totalCount - savedDisabled.length;
+      _message(
+        'Module permissions saved for $schoolName ($enabledCount/$totalCount modules enabled).',
+      );
+    }
+  }
+
+  Future<void> _operateSchoolAdmin(
+    Map<String, dynamic> school, {
+    int initialTab = 0,
+  }) async {
+    final schoolName =
+        '${school['school_name_gu'] ?? school['school_name_en'] ?? school['school_name'] ?? ''}'
+            .trim();
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    Map<String, dynamic>? profile;
+    try {
+      profile = await _service.developerImpersonateSchoolAdmin(
+        developerKey: _developerKeyController.text.trim(),
+        schoolRef: '${school['id']}',
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = error.toString().replaceFirst('Exception: ', '');
+        });
+        _message(_error!, isError: true);
+      }
+      return;
+    }
+
+    if (!mounted) {
+      _service.endDeveloperImpersonation();
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _operatingSchoolAdmin = true;
+    });
+
+    try {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (routeContext) => _DeveloperSchoolAdminOperatorScreen(
+            school: school,
+            profile: profile!,
+            initialTab: initialTab,
+            onExit: () => Navigator.of(routeContext).pop(),
+          ),
+        ),
+      );
+    } finally {
+      _service.endDeveloperImpersonation();
+      if (mounted) {
+        setState(() => _operatingSchoolAdmin = false);
+        await _reloadSchools();
+        _message('Returned to Developer Panel from $schoolName.');
+      }
+    }
+  }
+
   Widget _schoolCard(Map<String, dynamic> school) {
     final active = school['is_active'] == true;
     final blocked = school['is_blocked'] == true;
     final expired = school['expired'] == true;
     final prevUploadActive = _isPrevAttendanceUploadActiveForSchool(school);
     final prevUploadRem = _prevAttendanceUploadRemainingLabel(school);
+    final disabledModules = SchoolModuleRegistry.extractDisabledModules(school);
+    final totalModulesCount = SchoolModuleRegistry.allModules.length;
+    final enabledModulesCount =
+        (totalModulesCount - disabledModules.length).clamp(0, totalModulesCount);
+    final allModulesEnabled = disabledModules.isEmpty;
     final typeKey = '${school['school_type'] ?? 'mixed'}';
     final statusText = !active
         ? 'DEACTIVATED'
@@ -3503,28 +4005,58 @@ class _DeveloperPanelState extends State<DeveloperPanel>
                     ),
                     Text('Validity: ${_dateDisplay(school['validity_date'])}'),
                     const SizedBox(height: 5),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: statusColor.withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: statusColor.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(14),
                           ),
-                          child: Text(
-                            statusText,
-                            style: TextStyle(
-                              color: statusColor,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            child: Text(
+                              statusText,
+                              style: TextStyle(
+                                color: statusColor,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                           ),
                         ),
-                      ),
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: (allModulesEnabled
+                                    ? Colors.indigo
+                                    : Colors.amber.shade900)
+                                .withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            child: Text(
+                              allModulesEnabled
+                                  ? '🧩 ALL $totalModulesCount MODULES ENABLED'
+                                  : '🧩 $enabledModulesCount / $totalModulesCount MODULES ENABLED',
+                              style: TextStyle(
+                                color: allModulesEnabled
+                                    ? Colors.indigo.shade800
+                                    : Colors.amber.shade900,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                     if (blocked &&
                         '${school['block_reason'] ?? ''}'.trim().isNotEmpty)
@@ -3542,6 +4074,13 @@ class _DeveloperPanelState extends State<DeveloperPanel>
               trailing: PopupMenuButton<String>(
                 enabled: !_busy,
                 onSelected: (value) {
+                  if (value == 'operate_admin') {
+                    _operateSchoolAdmin(school, initialTab: 0);
+                  }
+                  if (value == 'operate_home') {
+                    _operateSchoolAdmin(school, initialTab: 2);
+                  }
+                  if (value == 'modules') _configureSchoolModules(school);
                   if (value == 'active') _setActive(school, !active);
                   if (value == 'blocked') _setBlocked(school, !blocked);
                   if (value == 'validity') _changeValidity(school);
@@ -3556,6 +4095,24 @@ class _DeveloperPanelState extends State<DeveloperPanel>
                   }
                 },
                 itemBuilder: (context) => [
+                  const PopupMenuItem(
+                    value: 'operate_admin',
+                    child: Text(
+                      '🛠️ Operate School Admin Panel (શાળાનું Admin Panel ચલાવો)',
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'operate_home',
+                    child: Text(
+                      '🏠 Operate Full School Workspace (સંપૂર્ણ શાળા ડેશબોર્ડ ચલાવો)',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'modules',
+                    child: Text(
+                      '🧩 Set Allowed Modules ($enabledModulesCount/$totalModulesCount Enabled)',
+                    ),
+                  ),
                   PopupMenuItem(
                     value: 'active',
                     child: Text(
@@ -3608,6 +4165,64 @@ class _DeveloperPanelState extends State<DeveloperPanel>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF0F172A),
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: _busy
+                              ? null
+                              : () => _operateSchoolAdmin(school, initialTab: 0),
+                          icon: const Icon(
+                            Icons.admin_panel_settings_rounded,
+                            size: 18,
+                          ),
+                          label: const Text(
+                            'Operate Admin Panel / શાળાનું Admin Panel ચલાવો',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: allModulesEnabled
+                                ? Colors.indigo.shade50
+                                : Colors.amber.shade50,
+                            foregroundColor: allModulesEnabled
+                                ? Colors.indigo.shade900
+                                : Colors.amber.shade900,
+                            side: BorderSide(
+                              color: allModulesEnabled
+                                  ? Colors.indigo.shade400
+                                  : Colors.amber.shade700,
+                            ),
+                          ),
+                          onPressed: _busy
+                              ? null
+                              : () => _configureSchoolModules(school),
+                          icon: const Icon(Icons.extension_rounded, size: 18),
+                          label: Text(
+                            allModulesEnabled
+                                ? 'Modules: All ($totalModulesCount/$totalModulesCount) • Set Modules'
+                                : 'Modules: $enabledModulesCount/$totalModulesCount Enabled • Set Modules',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
                   Row(
                     children: [
                       Expanded(
@@ -3684,6 +4299,19 @@ class _DeveloperPanelState extends State<DeveloperPanel>
                     label: const Text(
                       'Delete Attendance Records Only (Auto-Downloads Re-Uploadable Excel First)',
                       style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.2),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  FilledButton.tonalIcon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.red.shade50,
+                      foregroundColor: Colors.red.shade900,
+                    ),
+                    onPressed: _busy ? null : () => _deleteSchool(school),
+                    icon: const Icon(Icons.delete_forever_outlined, size: 18),
+                    label: const Text(
+                      'Permanently Delete Entire School (Auto-Backup + Full Wipe)',
+                      style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12.2),
                     ),
                   ),
                 ],
@@ -3826,6 +4454,125 @@ class _PrintServiceCardState extends State<_PrintServiceCard> {
             if (_status != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_status!)),
           ],
         ),
+      ),
+    );
+  }
+}
+
+
+/// Unified Developer operator shell for running a school's Admin Centre,
+/// Classes & Teachers workflow, or full signed-in school home directly from
+/// the Developer Panel.
+class _DeveloperSchoolAdminOperatorScreen extends StatefulWidget {
+  const _DeveloperSchoolAdminOperatorScreen({
+    required this.school,
+    required this.profile,
+    required this.onExit,
+    this.initialTab = 0,
+  });
+
+  final Map<String, dynamic> school;
+  final Map<String, dynamic> profile;
+  final VoidCallback onExit;
+  final int initialTab;
+
+  @override
+  State<_DeveloperSchoolAdminOperatorScreen> createState() =>
+      _DeveloperSchoolAdminOperatorScreenState();
+}
+
+class _DeveloperSchoolAdminOperatorScreenState
+    extends State<_DeveloperSchoolAdminOperatorScreen> {
+  late int _selectedTab;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedTab = widget.initialTab.clamp(0, 2);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final schoolName =
+        '${widget.school['school_name_gu'] ?? widget.school['school_name_en'] ?? widget.school['school_name'] ?? 'School'}'
+            .trim();
+    final schoolId = '${widget.school['school_id'] ?? ''}'.trim();
+
+    Widget currentBody;
+    if (_selectedTab == 0) {
+      currentBody = SupabaseAdminCenterScreen(profile: widget.profile);
+    } else if (_selectedTab == 1) {
+      currentBody = const AdminWorkflowPanel();
+    } else {
+      currentBody = SupabaseSignedInHome(
+        profile: widget.profile,
+        onLogout: () async => widget.onExit(),
+      );
+    }
+
+    return Scaffold(
+      body: Column(
+        children: [
+          Material(
+            color: const Color(0xFF0F172A),
+            elevation: 3,
+            child: SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.amber.shade300,
+                        foregroundColor: Colors.black87,
+                      ),
+                      onPressed: widget.onExit,
+                      icon: const Icon(Icons.arrow_back_rounded, size: 18),
+                      label: const Text(
+                        'Back to Developer Panel',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: Text(
+                        '🛠️ Developer Admin Mode: $schoolName (UDISE: $schoolId)',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13.5,
+                        ),
+                      ),
+                    ),
+                    ChoiceChip(
+                      selected: _selectedTab == 0,
+                      label: const Text('1. Admin Centre (શાળા સંચાલન)'),
+                      onSelected: (_) => setState(() => _selectedTab = 0),
+                    ),
+                    ChoiceChip(
+                      selected: _selectedTab == 1,
+                      label: const Text('2. Classes & Teachers (વર્ગ અને શિક્ષક)'),
+                      onSelected: (_) => setState(() => _selectedTab = 1),
+                    ),
+                    ChoiceChip(
+                      selected: _selectedTab == 2,
+                      label: const Text('3. Full School Home (સંપૂર્ણ શાળા ડેશબોર્ડ)'),
+                      onSelected: (_) => setState(() => _selectedTab = 2),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Expanded(child: currentBody),
+        ],
       ),
     );
   }

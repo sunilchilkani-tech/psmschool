@@ -86,6 +86,7 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
   List<Map<String, dynamic>> _students = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _allAccessibleActiveStudents = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _classes = <Map<String, dynamic>>[];
+  Set<String> _classTeacherClassIds = <String>{};
   Map<String, String> _classLabels = <String, String>{};
   late String _activeClassId;
   late String _activeClassLabel;
@@ -98,8 +99,18 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
   String? _error;
   String _search = '';
 
-  bool get _canEditExisting => !widget.readOnly;
-  bool get _canAdd => widget.isAdmin && !widget.readOnly;
+  bool _canManageClass(String classId) {
+    if (widget.readOnly) return false;
+    if (widget.isAdmin) return true;
+    final cid = classId.trim();
+    if (cid.isEmpty || cid == '__ALL__') {
+      return _classTeacherClassIds.isNotEmpty;
+    }
+    return _classTeacherClassIds.contains(cid);
+  }
+
+  bool get _canEditExisting => _canManageClass(_activeClassId);
+  bool get _canAdd => _canManageClass(_activeClassId);
 
   @override
   void initState() {
@@ -135,8 +146,15 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
           .eq('is_active', true)
           .order('sort_order');
       var sortedClasses = classRows.map((r) => Map<String, dynamic>.from(r)).toList();
-      if (!widget.isAdmin) {
+      Set<String> ctIdSet = <String>{};
+      if (widget.isAdmin) {
+        ctIdSet = sortedClasses.map((c) => _text(c['id'])).toSet();
+      } else {
         try {
+          final ctIds = await _client.rpc('psm_class_teacher_class_ids');
+          if (ctIds is List) {
+            ctIdSet = ctIds.map((e) => _text(e)).where((s) => s.isNotEmpty).toSet();
+          }
           final allowedIds = await _client.rpc('psm_attendance_class_ids');
           if (allowedIds is List) {
             final set = allowedIds.map((e) => _text(e)).toSet();
@@ -219,6 +237,7 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
       setState(() {
         _schoolRef = ref;
         _classes = sortedClasses;
+        _classTeacherClassIds = ctIdSet;
         _classLabels = labels;
         _archivedInClassCount = archClass;
         _archivedInSchoolCount = archSchool;
@@ -566,33 +585,78 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
 
   Future<void> _archiveStudent(Map<String, dynamic> student) async {
     if (!_canEditExisting || _saving || _schoolRef == null) return;
-    final today = DateTime.now();
-    final selectedDate = await showDatePicker(
-      context: context,
-      initialDate: DateTime(today.year, today.month, today.day),
-      firstDate: DateTime(1900),
-      lastDate: DateTime(today.year, today.month, today.day),
-      helpText: 'વિદ્યાર્થીએ શાળા કઈ તારીખે છોડી? / School leaving date',
-    );
-    if (selectedDate == null || !mounted) return;
+    var selectedDate = DateTime.now();
+    var selectedReason = 'lc';
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Deactive Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો'),
-        content: Text(
-          'Deactive ${_text(student['name'])}? Leaving date: '
-          '${selectedDate.day.toString().padLeft(2, '0')}/'
-          '${selectedDate.month.toString().padLeft(2, '0')}/${selectedDate.year}. '
-          'માત્ર આ ૧ જ વિદ્યાર્થી નિષ્ક્રિય (Deactive) થશે.',
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Deactive / નિષ્ક્રિય કરો')),
-        ],
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final dateIso =
+              '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
+          final dateDmy =
+              '${selectedDate.day.toString().padLeft(2, '0')}/${selectedDate.month.toString().padLeft(2, '0')}/${selectedDate.year}';
+          return AlertDialog(
+            title: const Text('Deactive Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'શું તમે "${_text(student['name'])}" ને નિષ્ક્રિય (Deactive) કરવા માંગો છો? માત્ર આ ૧ જ વિદ્યાર્થી નિષ્ક્રિય (Deactive) થશે.',
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: ctx,
+                      initialDate: selectedDate,
+                      firstDate: DateTime(1900, 1, 1),
+                      lastDate: DateTime.now().add(const Duration(days: 365)),
+                    );
+                    if (picked != null) {
+                      setDialogState(() => selectedDate = picked);
+                    }
+                  },
+                  icon: const Icon(Icons.event_outlined),
+                  label: Text('શાળા છોડ્યાની / કમી તારીખ: $dateDmy ($dateIso)'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  initialValue: selectedReason,
+                  decoration: const InputDecoration(
+                    labelText: 'હાજરીપત્રકના મુખપૃષ્ઠ મુજબ કમી કરવાનું કારણ',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'lc',
+                      child: Text('ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'continuous_absence',
+                      child: Text('સતત ગેરહાજરીથી નામ કમી કરેલ'),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setDialogState(() => selectedReason = v);
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel / રદ કરો'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Deactive / નિષ્ક્રિય કરો'),
+              ),
+            ],
+          );
+        },
       ),
     );
     if (confirm != true || !mounted) return;
@@ -609,7 +673,7 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
         params: <String, dynamic>{
           'p_student_id': '${student['id']}',
           'p_exit_date': leavingDate,
-          'p_exit_reason': 'lc',
+          'p_exit_reason': selectedReason,
         },
       );
       await _load();
@@ -629,61 +693,6 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
       sb.write(idx >= 0 ? idx : ch);
     }
     return sb.toString();
-  }
-
-  Future<void> _makeDeactivatedAllVisible(List<Map<String, dynamic>> targets) async {
-    if (!_canEditExisting || _saving || targets.isEmpty) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Make Deactivated All / બધા વિદ્યાર્થીઓને નિષ્ક્રિય (Deactive) કરો'),
-        content: Text(
-          'શું તમે હાલની યાદીના બધા ${targets.length} વિદ્યાર્થીઓને એકસાથે નિષ્ક્રિય (Deactive) કરવા માંગો છો? '
-          'તેમનો રેકોર્ડ સુરક્ષિત રહેશે અને ગમે ત્યારે પાછા Active કરી શકાશે.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel / રદ કરો'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text('Yes, Make Deactivated All (${targets.length})'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    try {
-      for (final student in targets) {
-        final sid = _text(student['id']);
-        if (sid.isEmpty) continue;
-        await _client.rpc(
-          'psm_archive_student_and_shift_rolls',
-          params: <String, dynamic>{
-            'p_student_id': sid,
-            'p_exit_reason': 'deactive',
-          },
-        );
-      }
-      FirestoreQueryBuilder.invalidateCache('students');
-      await _load();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('કુલ ${targets.length} વિદ્યાર્થીઓને નિષ્ક્રિય (Deactive) કરવામાં આવ્યા છે.'),
-        ),
-      );
-    } catch (error) {
-      if (mounted) setState(() => _error = _cleanError(error));
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
   }
 
   @override
@@ -763,12 +772,7 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
               child: const Icon(Icons.archive_outlined),
             ),
           ),
-          if (_canEditExisting && visible.isNotEmpty)
-            IconButton(
-              tooltip: 'Make Deactivated All (${visible.length})',
-              onPressed: _saving ? null : () => _makeDeactivatedAllVisible(visible),
-              icon: Icon(Icons.person_off_outlined, color: Colors.red.shade700),
-            ),
+
           IconButton(
               tooltip: 'Refresh',
               onPressed: _load,
@@ -928,30 +932,32 @@ class _StudentManagementScreenState extends State<StudentManagementScreen> {
                                       fontWeight: FontWeight.w700)),
                               subtitle: Text(
                                   '${_classLabels[_text(row['class_id'])] ?? ''} • GR: ${_text(row['gr']).isEmpty ? '-' : _text(row['gr'])} • Mobile: ${_text(row['mobile']).isEmpty ? '-' : _text(row['mobile'])} • પિતા: ${_text(row['father_name']).isEmpty ? '-' : _text(row['father_name'])} • માતા: ${_text(row['mother_name']).isEmpty ? '-' : _text(row['mother_name'])} • $category • $gender'),
-                              trailing: PopupMenuButton<String>(
-                                enabled: _canEditExisting,
-                                onSelected: (value) {
-                                  if (value == 'edit')
-                                    _openEditor(student: row);
-                                  if (value == 'change_section')
-                                    _changeSectionDialog(row);
-                                  if (value == 'archive') _archiveStudent(row);
-                                },
-                                itemBuilder: (_) => <PopupMenuEntry<String>>[
-                                  const PopupMenuItem(
-                                      value: 'edit',
-                                      child: Text('Edit student')),
-                                  if (widget.isAdmin && _classes.length > 1)
-                                    const PopupMenuItem(
-                                      value: 'change_section',
-                                      child: Text('Change Section (વિભાગ બદલો A↔B↔C)'),
-                                    ),
-                                  const PopupMenuItem(
-                                      value: 'archive',
-                                      child: Text('Deactive student (નિષ્ક્રિય કરો)')),
-                                ],
-                              ),
-                              onTap: _canEditExisting
+                              trailing: _canManageClass(_text(row['class_id']))
+                                  ? PopupMenuButton<String>(
+                                      enabled: _canManageClass(_text(row['class_id'])),
+                                      onSelected: (value) {
+                                        if (value == 'edit')
+                                          _openEditor(student: row);
+                                        if (value == 'change_section')
+                                          _changeSectionDialog(row);
+                                        if (value == 'archive') _archiveStudent(row);
+                                      },
+                                      itemBuilder: (_) => <PopupMenuEntry<String>>[
+                                        const PopupMenuItem(
+                                            value: 'edit',
+                                            child: Text('Edit student')),
+                                        if (widget.isAdmin && _classes.length > 1)
+                                          const PopupMenuItem(
+                                            value: 'change_section',
+                                            child: Text('Change Section (વિભાગ બદલો A↔B↔C)'),
+                                          ),
+                                        const PopupMenuItem(
+                                            value: 'archive',
+                                            child: Text('Deactive student (નિષ્ક્રિય કરો)')),
+                                      ],
+                                    )
+                                  : null,
+                              onTap: _canManageClass(_text(row['class_id']))
                                   ? () => _openEditor(student: row)
                                   : null,
                             ),

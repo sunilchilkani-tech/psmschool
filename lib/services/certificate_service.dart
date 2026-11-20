@@ -1161,7 +1161,7 @@ class CertificateService {
     final rightTopDetails = [
       await _guText('નામ :- $tName', 75, 580, size: 15),
       await _guText('હોદ્દો :- મદદનીશ શિક્ષક', 100, 580, size: 15),
-      await _guText('શાળા :- દરેડ કુમાર શાળા', 125, 580, size: 15),
+      await _guText('શાળા :- ${schoolName.trim().isNotEmpty ? schoolName.trim() : 'દરેડ કુમાર શાળા'}', 125, 580, size: 15),
       await _guText('ધોરણ :- $cleanClass', 150, 580, size: 15),
       await _guText('તારીખ :- $today', 175, 580, size: 15),
     ];

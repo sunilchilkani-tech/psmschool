@@ -75,7 +75,7 @@ class SupabaseSchoolSettingsService {
       }
     } catch (_) {}
     try {
-      final ctx = await _client.rpc('current_school_context');
+      final ctx = await _client.rpc('psm_library_school_context');
       if (ctx is Map && (ctx['school_type'] ?? '').toString().trim().isNotEmpty) {
         return DateWiseReportColumn.normalizeSchoolType(ctx['school_type']);
       }

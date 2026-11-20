@@ -1086,8 +1086,9 @@ class RojmelEngine extends ChangeNotifier {
   double? globalFontPt;
   Map<String, double> pageFontMap = <String, double>{'default': 10.0};
   Map<String, int> pageEntryCountMap = <String, int>{};
-  double cashbookEntryGapMm = 4.0;
+  double cashbookEntryGapMm = -1.0; // -1.0 = Auto Full Page Cover (stretches entries/gaps to cover full page)
   Map<String, double> pageEntryGapMap = <String, double>{};
+  String selectedSetupPageKey = 'ALL'; // 'ALL' or Credit Page No ('1', '3', '5'...)
 
   int? getCreditPageEntryCount(String acc, int creditPageNo, [String? pairKey]) {
     final oddPage = creditPageNo.isOdd ? creditPageNo : (creditPageNo - 1);
@@ -1111,7 +1112,8 @@ class RojmelEngine extends ChangeNotifier {
     final v = pageEntryGapMap['$acc|creditPage|$oddPage'] ??
         (pairKey != null ? pageEntryGapMap[pairKey] : null) ??
         cashbookEntryGapMm;
-    return v.clamp(0.0, 35.0);
+    if (v < 0) return -1.0; // Auto Full Page Cover
+    return v.clamp(0.0, 60.0);
   }
 
   void setCreditPageEntryGapMm(String acc, int creditPageNo, double? gapMm, [String? pairKey]) {
@@ -1120,7 +1122,7 @@ class RojmelEngine extends ChangeNotifier {
       pageEntryGapMap.remove('$acc|creditPage|$oddPage');
       if (pairKey != null) pageEntryGapMap.remove(pairKey);
     } else {
-      final clamped = gapMm.clamp(0.0, 35.0);
+      final clamped = gapMm < 0 ? -1.0 : gapMm.clamp(0.0, 60.0);
       pageEntryGapMap['$acc|creditPage|$oddPage'] = clamped;
       if (pairKey != null) pageEntryGapMap[pairKey] = clamped;
     }
@@ -1139,6 +1141,8 @@ class RojmelEngine extends ChangeNotifier {
   double parishisht10RowHeightPx = 30.0;
   Map<String, double> rowHeightsDemo = <String, double>{};
   bool directPageEditActive = false;
+  int _idNonce = 0;
+  Set<String> lockedAccountFys = <String>{};
 
   RojmelEngine() {
     _initDefaultAccountMeta();
@@ -1489,6 +1493,11 @@ class RojmelEngine extends ChangeNotifier {
     selectedMonthlyLimitMonth = json['selectedMonthlyLimitMonth']?.toString() ?? 'ALL';
     activeReportType = json['activeReportType']?.toString() ?? 'daybook';
     activeReportNumber = (((json['activeReportNumber'] as num?)?.toInt() ?? 1).clamp(1, 18)).toInt();
+    final rawLockedFys = json['lockedAccountFys'];
+    lockedAccountFys = rawLockedFys is List
+        ? rawLockedFys.map((e) => e.toString().trim()).where((s) => s.isNotEmpty).toSet()
+        : <String>{};
+    repairDuplicateIdsAndSplitGroups();
     renumberVouchers(forceRecalc: false);
     if (notify) notifyListeners();
   }
@@ -1983,49 +1992,183 @@ class RojmelEngine extends ChangeNotifier {
   /// Example: If 10/10/2025 is entered first -> Voucher 1.
   /// When an earlier transaction 09/09/2025 is entered later -> 09/09/2025 automatically becomes Voucher 1,
   /// and 10/10/2025 automatically becomes Voucher 2!
-  void renumberVouchers({bool forceRecalc = false}) {
+  bool isAccountFyLocked(String account, String dateOrFy) {
+    final clean = dateOrFy.trim();
+    final fy = RegExp(r'^\d{4}-\d{2}$').hasMatch(clean)
+        ? clean
+        : financialYearFromDate(clean);
+    if (fy.isEmpty) return false;
+    return lockedAccountFys.contains('$account|$fy');
+  }
+
+  /// Ensures every entry has a unique `id` and separates collided SNA 60:40
+  /// `splitGroup`s (e.g. rapid Excel uploads in the same millisecond) so each
+  /// group holds at most one 60% leg and one 40% leg for the same transaction.
+  int repairDuplicateIdsAndSplitGroups({String? accountOnly}) {
+    int fixes = 0;
+    final seenIds = <String>{};
+    for (int i = 0; i < entries.length; i++) {
+      final e = entries[i];
+      if (e.id.trim().isEmpty || !seenIds.add(e.id)) {
+        e.id = 'id-fix-${e.seq}-${++_idNonce}-$i';
+        seenIds.add(e.id);
+        fixes++;
+      }
+    }
+
+    final byGroup = <String, List<RojmelEntry>>{};
+    for (final e in entries) {
+      if (e.type != 'debit' || e.splitGroup.trim().isEmpty) continue;
+      if (accountOnly != null && accountOnly.isNotEmpty && e.account != accountOnly) continue;
+      byGroup.putIfAbsent('${e.account}|${e.splitGroup}', () => <RojmelEntry>[]).add(e);
+    }
+
+    for (final grp in byGroup.values) {
+      if (grp.length == 2) {
+        final a = grp[0];
+        final b = grp[1];
+        final pA = a.splitPercent.round();
+        final pB = b.splitPercent.round();
+        final isCleanPair = a.date == b.date &&
+            a.head == b.head &&
+            a.party.trim().toLowerCase() == b.party.trim().toLowerCase() &&
+            ((pA == 60 && pB == 40) || (pA == 40 && pB == 60));
+        if (isCleanPair) continue;
+      }
+      if (grp.length <= 1) continue;
+
+      grp.sort((a, b) => a.seq.compareTo(b.seq));
+      final used = List<bool>.filled(grp.length, false);
+      for (int i = 0; i < grp.length; i++) {
+        if (used[i]) continue;
+        final first = grp[i];
+        used[i] = true;
+        final pct1 = first.splitPercent.round();
+        int partnerIdx = -1;
+        if (pct1 == 60 || pct1 == 40) {
+          final wantPct = pct1 == 60 ? 40 : 60;
+          for (int j = i + 1; j < grp.length; j++) {
+            if (used[j]) continue;
+            final cand = grp[j];
+            if (cand.date == first.date &&
+                cand.head == first.head &&
+                cand.party.trim().toLowerCase() == first.party.trim().toLowerCase() &&
+                cand.splitPercent.round() == wantPct &&
+                (cand.originalAmount - first.originalAmount).abs() <= 0.02) {
+              partnerIdx = j;
+              break;
+            }
+          }
+        }
+        final freshGroup = 'SNA-D-FIX-${first.seq}-${++_idNonce}';
+        first.splitGroup = freshGroup;
+        if (partnerIdx >= 0) {
+          used[partnerIdx] = true;
+          grp[partnerIdx].splitGroup = freshGroup;
+        }
+        fixes++;
+      }
+    }
+    return fixes;
+  }
+
+  /// Numbers Debit vouchers strictly sequentially in exact Cashbook display order
+  /// `(date, orderedHeads, seq)` per `(account, FY)`:
+  /// - Valid SNA 60%+40% pairs share one voucher number by default.
+  /// - Different claim / second entry of the same percentage gets a new voucher.
+  /// - Explicit Admin `manualVoucher` edits are honored first and subsequent
+  ///   vouchers continue seamlessly across Cashbook and all 29 reports.
+  void renumberVouchers({bool forceRecalc = false, String? accountOnly}) {
     for (final e in entries) {
       if (e.date.isNotEmpty) e.date = normalizeToIsoDate(e.date);
       if (e.clearDate.isNotEmpty) e.clearDate = normalizeToIsoDate(e.clearDate);
     }
-    final sortedAll = getSortedEntries(entries);
-    final groups = <String, int>{};
-    final splitGroupVoucher = <String, int>{};
+    repairDuplicateIdsAndSplitGroups(accountOnly: accountOnly);
 
-    for (final e in sortedAll) {
-      if (e.type != 'debit') {
-        e.voucher = '';
-        continue;
+    final targetAccounts = <String>{
+      for (final e in entries)
+        if (accountOnly == null || accountOnly.isEmpty || (e.account.isNotEmpty ? e.account : 'SNA SPARSH') == accountOnly)
+          (e.account.isNotEmpty ? e.account : 'SNA SPARSH'),
+    };
+
+    for (final acc in targetAccounts) {
+      final accAll = getSortedEntries(
+        entries.where((e) => (e.account.isNotEmpty ? e.account : 'SNA SPARSH') == acc).toList(),
+      );
+      final byDate = <String, List<RojmelEntry>>{};
+      for (final e in accAll) {
+        byDate.putIfAbsent(e.date, () => <RojmelEntry>[]).add(e);
       }
-      final entryFy = financialYearFromDate(e.date);
-      final k = '${e.account}|${entryFy.isNotEmpty ? entryFy : financialYear}';
+      final dates = byDate.keys.toList()..sort();
 
-      // If part of an SNA 60:40 split pair whose first leg was already assigned a voucher number, share that exact voucher!
-      if (e.splitGroup.isNotEmpty && splitGroupVoucher.containsKey(e.splitGroup)) {
-        final sharedV = splitGroupVoucher[e.splitGroup]!;
-        e.voucher = '$sharedV';
-        e.sr = sharedV;
-        if (forceRecalc) e.manualVoucher = '';
-        continue;
-      }
+      final groups = <String, int>{};
+      final splitGroupVoucher = <String, String>{};
+      final splitGroupClaimByPct = <String, String>{};
 
-      if (!forceRecalc && e.manualVoucher.trim().isNotEmpty) {
-        e.voucher = e.manualVoucher.trim();
-        final n = int.tryParse(e.manualVoucher.trim());
-        if (n != null) {
-          if (n > (groups[k] ?? 0)) groups[k] = n;
-          if (e.splitGroup.isNotEmpty) splitGroupVoucher[e.splitGroup] = n;
+      for (final d in dates) {
+        final day = byDate[d]!;
+        final dc = day.where((e) => e.type == 'credit').toList();
+        final dd = day.where((e) => e.type == 'debit').toList();
+        for (final c in dc) {
+          c.voucher = '';
         }
-        continue;
-      }
+        final orderedHeads = <String>[];
+        for (final e in <RojmelEntry>[...dc, ...dd]) {
+          if (!orderedHeads.contains(e.head)) orderedHeads.add(e.head);
+        }
 
-      groups[k] = (groups[k] ?? 0) + 1;
-      final assigned = groups[k]!;
-      e.voucher = '$assigned';
-      e.sr = assigned;
-      if (forceRecalc) e.manualVoucher = '';
-      if (e.splitGroup.isNotEmpty) {
-        splitGroupVoucher[e.splitGroup] = assigned;
+        for (final h in orderedHeads) {
+          final hDebits = dd.where((e) => e.head == h).toList();
+          for (final e in hDebits) {
+            final entryFy = financialYearFromDate(e.date);
+            final fyKey = entryFy.isNotEmpty ? entryFy : financialYear;
+            final k = '$acc|$fyKey';
+            final pct = e.splitPercent.round();
+            final sgKey = e.splitGroup.isNotEmpty ? '$k|${e.splitGroup}' : '';
+            final pctKey = (sgKey.isNotEmpty && (pct == 60 || pct == 40)) ? '$sgKey|$pct' : '';
+
+            // 1. Honor explicit Admin manual voucher first (supports separate 60%/40% vouchers)
+            if (!forceRecalc && e.manualVoucher.trim().isNotEmpty) {
+              final mv = e.manualVoucher.trim();
+              e.voucher = mv;
+              final n = int.tryParse(mv);
+              if (n != null) {
+                e.sr = n;
+                if (n > (groups[k] ?? 0)) groups[k] = n;
+              }
+              if (sgKey.isNotEmpty && !splitGroupVoucher.containsKey(sgKey)) {
+                splitGroupVoucher[sgKey] = mv;
+                if (pctKey.isNotEmpty) splitGroupClaimByPct[pctKey] = e.txn.trim();
+              }
+              continue;
+            }
+
+            // 2. Share voucher with 60%/40% partner ONLY if this percentage leg is not already taken
+            if (sgKey.isNotEmpty && splitGroupVoucher.containsKey(sgKey)) {
+              final samePctAlreadyUsed = pctKey.isNotEmpty && splitGroupClaimByPct.containsKey(pctKey);
+              if (!samePctAlreadyUsed) {
+                final sharedV = splitGroupVoucher[sgKey]!;
+                e.voucher = sharedV;
+                final n = int.tryParse(sharedV);
+                if (n != null) e.sr = n;
+                if (forceRecalc) e.manualVoucher = '';
+                if (pctKey.isNotEmpty) splitGroupClaimByPct[pctKey] = e.txn.trim();
+                continue;
+              }
+            }
+
+            // 3. Assign next sequential voucher number
+            groups[k] = (groups[k] ?? 0) + 1;
+            final assigned = groups[k]!;
+            e.voucher = '$assigned';
+            e.sr = assigned;
+            if (forceRecalc) e.manualVoucher = '';
+            if (sgKey.isNotEmpty) {
+              splitGroupVoucher[sgKey] = '$assigned';
+              if (pctKey.isNotEmpty) splitGroupClaimByPct[pctKey] = e.txn.trim();
+            }
+          }
+        }
       }
     }
   }
@@ -2157,6 +2300,11 @@ class RojmelEngine extends ChangeNotifier {
       }
     }
 
+    // Block new entries into a frozen/locked audited FY
+    if (isAccountFyLocked(account, cleanDate)) {
+      return '\u0A86 \u0AA8\u0ABE\u0AA3\u0ABE\u0A95\u0AC0\u0AAF \u0AB5\u0AB0\u0ACD\u0AB7 (FY) \u0AAB\u0ACD\u0AB0\u0AC0\u0A9D/\u0AB2\u0ACB\u0A95 \u0AA5\u0AAF\u0AC7\u0AB2 \u0A9B\u0AC7. \u0AA8\u0AB5\u0AC0 \u0A8F\u0AA8\u0ACD\u0A9F\u0ACD\u0AB0\u0AC0 \u0A95\u0AC7 \u0AAB\u0AC7\u0AB0\u0AAB\u0ABE\u0AB0 \u0AA5\u0A88 \u0AB6\u0A95\u0AB6\u0AC7 \u0AA8\u0AB9\u0AC0\u0A82.';
+    }
+
     // Auto-derive Financial Year according to Transaction Date
     syncFinancialYearFromDate(cleanDate, notify: false);
 
@@ -2218,7 +2366,8 @@ class RojmelEngine extends ChangeNotifier {
     final nextV = userManualVoucher.isNotEmpty ? userManualVoucher : '${nextSuggestedVoucher(account)}';
     final nextSr = int.tryParse(nextV) ?? nextSuggestedVoucher(account);
     final baseSeq = entries.fold<int>(0, (prev, e) => math.max(prev, e.seq)) + 1;
-    final baseId = 'id-${DateTime.now().microsecondsSinceEpoch}';
+    final nonce = ++_idNonce;
+    final baseId = 'id-${DateTime.now().microsecondsSinceEpoch}-$baseSeq-$nonce';
 
     if (isDebitSplit) {
       if (sna60Claim.trim().isEmpty || sna60Date.trim().isEmpty || sna40Claim.trim().isEmpty || sna40Date.trim().isEmpty) {
@@ -2231,7 +2380,7 @@ class RojmelEngine extends ChangeNotifier {
       if ((amount60 + amount40 - amount).abs() > 0.01) {
         return '60% (₹${fmtDemoNum(amount60)}) + 40% (₹${fmtDemoNum(amount40)}) = ₹${fmtDemoNum(amount60 + amount40)} પૂરી રકમ ₹${fmtDemoNum(amount)} બરાબર હોવી જોઈએ. 60% / 40% રકમ સુધારો.';
       }
-      final group = 'SNA-D-${DateTime.now().millisecondsSinceEpoch}';
+      final group = 'SNA-D-${DateTime.now().microsecondsSinceEpoch}-$baseSeq-$nonce';
       String strippedNarr = cleanNarr.replaceAll(RegExp(r'\s*\(([^)]*?)\s*(60|40)%.*?\)\s*$'), '');
       if (cleanParty.isNotEmpty && !strippedNarr.toLowerCase().contains(cleanParty.toLowerCase())) {
         strippedNarr = '$cleanParty ને $strippedNarr';
@@ -2321,7 +2470,7 @@ class RojmelEngine extends ChangeNotifier {
       }
       final suf60 = custom60Suffix.trim().isNotEmpty ? custom60Suffix.trim() : '(વાઉચરના 60%)';
       final suf40 = custom40Suffix.trim().isNotEmpty ? custom40Suffix.trim() : '(વાઉચરના 40%)';
-      final group = 'SNA-C-${DateTime.now().millisecondsSinceEpoch}';
+      final group = 'SNA-C-${DateTime.now().microsecondsSinceEpoch}-$baseSeq-$nonce';
       final strippedNarr = cleanNarr.replaceAll(RegExp(r'\s*\((વાઉચરના|ગ્રાન્ટના)\s*(60|40)%.*?\)\s*$'), '');
       entries.add(RojmelEntry(
         sr: nextSr,
@@ -2615,6 +2764,9 @@ class RojmelEngine extends ChangeNotifier {
     }
     if (updated.type != 'debit') updated.expense = updated.head;
     final old = entries[idx];
+    if (isAccountFyLocked(old.account, old.date) || isAccountFyLocked(updated.account, updated.date)) {
+      return '\u0A86 \u0AA8\u0ABE\u0AA3\u0ABE\u0A95\u0AC0\u0AAF \u0AB5\u0AB0\u0ACD\u0AB7 (FY) \u0AAB\u0ACD\u0AB0\u0AC0\u0A9D/\u0AB2\u0ACB\u0A95 \u0AA5\u0AAF\u0AC7\u0AB2 \u0A9B\u0AC7. \u0AA8\u0AB5\u0AC0 \u0A8F\u0AA8\u0ACD\u0A9F\u0ACD\u0AB0\u0AC0 \u0A95\u0AC7 \u0AAB\u0AC7\u0AB0\u0AAB\u0ABE\u0AB0 \u0AA5\u0A88 \u0AB6\u0A95\u0AB6\u0AC7 \u0AA8\u0AB9\u0AC0\u0A82.';
+    }
     final candidate = List<RojmelEntry>.from(entries)..[idx] = updated;
     final err = validateHeadRunningBalances(
       updated.account,
@@ -2629,7 +2781,7 @@ class RojmelEngine extends ChangeNotifier {
   }
 
   void deleteSingleEntry(String id) {
-    entries.removeWhere((e) => e.id == id);
+    entries.removeWhere((e) => e.id == id && !isAccountFyLocked(e.account, e.date));
     renumberVouchers(forceRecalc: false);
     notifyListeners();
   }
@@ -2680,21 +2832,165 @@ class RojmelEngine extends ChangeNotifier {
     return removedCount;
   }
 
+  String nextFinancialYearLabel([String? fromFy]) {
+    final base = (fromFy ?? financialYear).trim();
+    final parts = base.split('-');
+    final startYr = parts.isNotEmpty ? (int.tryParse(parts.first) ?? DateTime.now().year) : DateTime.now().year;
+    final nextStart = startYr + 1;
+    final nextEnd = ((nextStart + 1) % 100).toString().padLeft(2, '0');
+    return '$nextStart-$nextEnd';
+  }
+
+  /// Builds a self-contained immutable archive payload for one account & FY
+  /// before transitioning active books to the next FY.
+  Map<String, dynamic> buildFrozenFyArchiveSnapshot(String accName, {String? targetFy}) {
+    final m = getAccountMeta(accName);
+    final accEntries = getSortedEntries(getAccountEntries(accName));
+    final fy = (targetFy != null && targetFy.trim().isNotEmpty)
+        ? targetFy.trim()
+        : (accEntries.isNotEmpty && financialYearFromDate(accEntries.first.date).isNotEmpty
+            ? financialYearFromDate(accEntries.first.date)
+            : financialYear);
+    final fyEntries = accEntries.where((e) {
+      final efy = financialYearFromDate(e.date);
+      return efy.isEmpty || efy == fy;
+    }).toList();
+    final openBal = getAccountOpening(accName);
+    final summary = computeHeadWiseSummary(accName);
+    double crC = 0, crB = 0, drC = 0, drB = 0;
+    for (final e in fyEntries) {
+      if (e.type == 'credit') {
+        crC += cashAmt(e);
+        crB += bankAmt(e);
+      } else {
+        drC += cashAmt(e);
+        drB += bankAmt(e);
+      }
+    }
+    final closeC = double.parse((openBal.cash + crC - drC).toStringAsFixed(2));
+    final closeB = double.parse((openBal.bank + crB - drB).toStringAsFixed(2));
+    return <String, dynamic>{
+      'version': 'ROJMEL_FY_ARCHIVE_V1',
+      'schoolName': schoolName,
+      'udiseCode': udiseCode,
+      'financialYear': fy,
+      'accountName': accName,
+      'accountType': m.type,
+      'frozenAt': DateTime.now().toUtc().toIso8601String(),
+      'entryCount': fyEntries.length,
+      'accountMeta': m.toJson(),
+      'totals': <String, dynamic>{
+        'openCash': openBal.cash,
+        'openBank': openBal.bank,
+        'openTotal': openBal.total,
+        'totalCrCash': crC,
+        'totalCrBank': crB,
+        'totalCr': crC + crB,
+        'totalDrCash': drC,
+        'totalDrBank': drB,
+        'totalDr': drC + drB,
+        'closeCash': closeC,
+        'closeBank': closeB,
+        'closeTotal': closeC + closeB,
+      },
+      'headSummary': summary
+          .map((r) => <String, dynamic>{
+                'head': r.head,
+                'openCash': r.openCash,
+                'openBank': r.openBank,
+                'credit': r.credit,
+                'debit': r.debit,
+                'closeCash': r.closeCash,
+                'closeBank': r.closeBank,
+                'closing': r.closing,
+                'annualLimit': r.annualLimit,
+              })
+          .toList(),
+      'entries': fyEntries.map((e) => e.toJson()).toList(),
+    };
+  }
+
+  /// Applies FY carry-forward ONLY after the immutable archive is saved:
+  /// - BANK account: carries exact head-wise closing Cash & Bank balances forward as Opening Balances.
+  /// - PFMS / SNA SPARSH accounts: resets Opening Balance to 0.00 and preserves all Grant Heads & Annual Limits.
+  void applyFyCarryForwardAfterArchive(
+    String accName, {
+    required String frozenFy,
+    required String nextFinancialYear,
+  }) {
+    final m = getAccountMeta(accName);
+    final accEntries = getSortedEntries(getAccountEntries(accName));
+    final fyEntries = accEntries.where((e) {
+      final efy = financialYearFromDate(e.date);
+      return efy.isEmpty || efy == frozenFy;
+    }).toList();
+    final headsList = getAccountSpecificHeads(accName);
+
+    if (m.type == 'BANK') {
+      final newHeadOpenings = <String, HeadBalance>{};
+      double newTotalCash = 0.0;
+      double newTotalBank = 0.0;
+      for (final h in headsList) {
+        final hop = getHeadOpening(accName, h);
+        double c = hop.cash;
+        double b = hop.bank;
+        for (final e in fyEntries.where((x) => x.head == h)) {
+          final s = e.type == 'credit' ? 1.0 : -1.0;
+          c += s * cashAmt(e);
+          b += s * bankAmt(e);
+        }
+        c = math.max(0.0, double.parse(c.toStringAsFixed(2)));
+        b = math.max(0.0, double.parse(b.toStringAsFixed(2)));
+        newHeadOpenings[h] = HeadBalance(cash: c, bank: b);
+        newTotalCash += c;
+        newTotalBank += b;
+      }
+      m.headOpenings = newHeadOpenings;
+      m.openingCash = double.parse(newTotalCash.toStringAsFixed(2));
+      m.openingBank = double.parse(newTotalBank.toStringAsFixed(2));
+      m.openingConfigured = true;
+      m.heads = List<String>.from(headsList);
+    } else {
+      // PFMS / SNA SPARSH: Opening starts at 0.00, all Grant Heads & Annual Limits carry forward unchanged.
+      m.headOpenings = <String, HeadBalance>{};
+      m.openingCash = 0.0;
+      m.openingBank = 0.0;
+      m.heads = List<String>.from(headsList);
+    }
+    accountMeta[accName] = m;
+    lockedAccountFys.add('$accName|$frozenFy');
+
+    final fyIds = fyEntries.map((e) => e.id).toSet();
+    entries.removeWhere((e) => e.account == accName && fyIds.contains(e.id));
+
+    if (RegExp(r'^\d{4}-\d{2}$').hasMatch(nextFinancialYear.trim())) {
+      financialYear = nextFinancialYear.trim();
+      final nextStart = int.tryParse(financialYear.split('-').first) ?? DateTime.now().year;
+      openingBalanceDate = '$nextStart-04-01';
+      cashbookFromDate = '$nextStart-04-01';
+      cashbookToDate = '${nextStart + 1}-03-31';
+      reportFromDate = '$nextStart-04-01';
+      reportToDate = '${nextStart + 1}-03-31';
+    }
+    renumberVouchers(forceRecalc: false);
+    notifyListeners();
+  }
+
   // --------------------------------------------------------------------------
   // EXACT V06 SMART WRITING-AREA CASHBOOK PAGINATION & PAGE MAP
   // (`estimateEntryWritingHeightMM`, `splitDayIntoExcelPagePairs`, `buildCashbookPages`)
   // --------------------------------------------------------------------------
 
   double estimateEntryWritingHeightMM(RojmelEntry? e, String side, double fontPt) {
-    if (e == null) return 22.0;
+    if (e == null) return 12.0;
     final f = (fontPt > 0 ? fontPt : 10.0).clamp(6.0, 16.0);
     final scale = f / 10.0;
     final narr = side == 'credit' ? formatCreditNarration(e) : formatDebitNarration(e);
     final party = e.party.trim();
     final head = e.head.trim();
-    // Column widths: Credit narration is 30% (~21 chars at 10pt), Debit narration is 22% (~15 chars at 10pt).
-    final charsPerNarrLine = math.max(8.0, (side == 'debit' ? 15.0 : 21.0) / scale);
-    final charsPerHeadLine = math.max(5.0, (side == 'debit' ? 8.5 : 15.0) / scale);
+    // Column widths: Credit narration is 30% (~22 chars at 10pt), Debit narration is 22% (~16 chars at 10pt).
+    final charsPerNarrLine = math.max(8.0, (side == 'debit' ? 16.0 : 22.0) / scale);
+    final charsPerHeadLine = math.max(5.0, (side == 'debit' ? 9.5 : 16.0) / scale);
     final segs = narr.split(RegExp(r'<br\s*/?>|\n', caseSensitive: false));
     int narrLines = 0;
     for (final seg in segs) {
@@ -2718,7 +3014,7 @@ class RojmelEngine extends ChangeNotifier {
       }
     }
     final lines = [narrLines, headLines, claimLines, 2].reduce(math.max);
-    return math.max(16.5 * scale, ((lines * 4.25 * scale) + 4.8).roundToDouble());
+    return math.max(10.5 * scale, ((lines * 3.35 * scale) + 2.4).roundToDouble());
   }
 
   /// Pairs Credit and Debit entries into 1-to-1 horizontally opposite Row Slots `(cr, dr)`
@@ -2782,7 +3078,7 @@ class RojmelEngine extends ChangeNotifier {
     }
 
     final loss = cashbookAreaLossMm;
-    final drWritingAreaMm = math.max(90.0, 176.0 - loss);
+    final drWritingAreaMm = math.max(110.0, 224.0 - loss);
     final baseFont = globalFontPt ?? pageFontMap['default'] ?? cashbookPrintFontPt;
     final defaultCap = defaultMaxEntriesPerPage > 0 ? defaultMaxEntriesPerPage : 6;
 
@@ -2795,7 +3091,8 @@ class RojmelEngine extends ChangeNotifier {
       final creditPageNo = startCreditPageNo + pairIdx * 2;
       final pairKey = '$acc|$dateStr|$pairIdx';
       final manualCount = getCreditPageEntryCount(acc, creditPageNo, pairKey) ?? 0;
-      final gapMm = getCreditPageEntryGapMm(acc, creditPageNo, pairKey);
+      final rawGapMm = getCreditPageEntryGapMm(acc, creditPageNo, pairKey);
+      final packGapMm = rawGapMm < 0 ? 4.0 : math.min(rawGapMm, 12.0);
       final crFont = pageFontMap['page|$acc|$creditPageNo'] ?? pageFontMap[pairKey] ?? baseFont;
       final drFont = pageFontMap['page|$acc|${creditPageNo + 1}'] ?? pageFontMap[pairKey] ?? baseFont;
 
@@ -2807,12 +3104,13 @@ class RojmelEngine extends ChangeNotifier {
       } else {
         int takeCount = 0;
         double usedMM = 0.0;
+        final isExplicitDefaultCap = defaultCap != 12;
         while (sIdx + takeCount < aligned.length && takeCount < defaultCap) {
           final slot = aligned[sIdx + takeCount];
           final hCr = slot.cr != null ? estimateEntryWritingHeightMM(slot.cr, 'credit', crFont) : 0.0;
           final hDr = slot.dr != null ? estimateEntryWritingHeightMM(slot.dr, 'debit', drFont) : 0.0;
-          final slotH = math.max(hCr, hDr) + gapMm;
-          if (takeCount > 0 && (usedMM + slotH > drWritingAreaMm)) break;
+          final slotH = math.max(hCr, hDr) + packGapMm;
+          if (!isExplicitDefaultCap && takeCount > 0 && (usedMM + slotH > drWritingAreaMm)) break;
           usedMM += slotH;
           takeCount++;
         }
@@ -2900,7 +3198,7 @@ class RojmelEngine extends ChangeNotifier {
     }
 
     final loss = cashbookAreaLossMm;
-    final drBudgetMm = math.max(90.0, 176.0 - loss);
+    final drBudgetMm = math.max(110.0, 224.0 - loss);
     final baseFontPt = globalFontPt ?? pageFontMap['default'] ?? cashbookPrintFontPt;
     final defaultCap = defaultMaxEntriesPerPage > 0 ? defaultMaxEntriesPerPage : 12;
     final mAcc = getAccountMeta(acc);
@@ -3006,15 +3304,17 @@ class RojmelEngine extends ChangeNotifier {
           } else {
             final crFont = crFontForCurrentPair();
             final drFont = drFontForCurrentPair();
-            final gapMm = gapMmForCurrentPair();
+            final rawGap = gapMmForCurrentPair();
+            final packGap = rawGap < 0 ? 4.0 : math.min(rawGap, 10.0);
+            final isAutoMode = defaultMaxEntriesPerPage == 12;
             double grpH = 0.0;
             for (final gs in groupSlots) {
               final hc = gs.cr != null ? estimateEntryWritingHeightMM(gs.cr, 'credit', crFont) : 0.0;
               final hd = gs.dr != null ? estimateEntryWritingHeightMM(gs.dr, 'debit', drFont) : 0.0;
-              grpH += math.max(hc, hd) + gapMm;
+              grpH += math.max(hc, hd) + packGap;
             }
             if (currentSlots.length + groupSlots.length > defaultCap ||
-                usedHeightMm + grpH > drBudgetMm) {
+                (isAutoMode && usedHeightMm + grpH > drBudgetMm)) {
               flush();
             }
           }
@@ -3028,15 +3328,17 @@ class RojmelEngine extends ChangeNotifier {
           final cap = manualCap ?? defaultCap;
           final crFont = crFontForCurrentPair();
           final drFont = drFontForCurrentPair();
-          final gapMm = gapMmForCurrentPair();
+          final rawGap = gapMmForCurrentPair();
+          final packGap = rawGap < 0 ? 4.0 : math.min(rawGap, 10.0);
+          final isAutoMode = manualCap == null && defaultMaxEntriesPerPage == 12;
 
           final slot = groupSlots[gIdx];
           final hc = slot.cr != null ? estimateEntryWritingHeightMM(slot.cr, 'credit', crFont) : 0.0;
           final hd = slot.dr != null ? estimateEntryWritingHeightMM(slot.dr, 'debit', drFont) : 0.0;
-          final slotH = math.max(hc, hd) + gapMm;
+          final slotH = math.max(hc, hd) + packGap;
 
           final exceedsCount = currentSlots.length >= cap;
-          final exceedsHeight = manualCap == null && (usedHeightMm + slotH > drBudgetMm);
+          final exceedsHeight = isAutoMode && (usedHeightMm + slotH > drBudgetMm);
 
           if (currentSlots.isNotEmpty && (exceedsCount || exceedsHeight)) {
             flush();
@@ -3164,16 +3466,18 @@ class RojmelEngine extends ChangeNotifier {
         final alignedSlots = buildAlignedSlotsForEntries(crRows, drRows);
         final alignedCr = alignedSlots.map((s) => s.cr).toList();
         final alignedDr = alignedSlots.map((s) => s.dr).toList();
-        double gapMm = getCreditPageEntryGapMm(acc, creditPageNo, pairKey);
+        final rawGapMm = getCreditPageEntryGapMm(acc, creditPageNo, pairKey);
+        final isAutoFullPageGap = rawGapMm < 0;
+        double gapMm = isAutoFullPageGap ? 6.0 : rawGapMm;
 
         final loss = cashbookAreaLossMm;
-        final drSafeBudgetMm = math.max(90.0, 176.0 - loss);
+        final drSafeBudgetMm = math.max(115.0, 224.0 - loss);
 
         double computeSlotContentMm(int idx, double cF, double dF) {
           final s = alignedSlots[idx];
           final hCr = s.cr != null ? estimateEntryWritingHeightMM(s.cr, 'credit', cF) : 0.0;
           final hDr = s.dr != null ? estimateEntryWritingHeightMM(s.dr, 'debit', dF) : 0.0;
-          final minH = 14.5 * (math.max(cF, dF) / 10.0);
+          final minH = 10.5 * (math.max(cF, dF) / 10.0);
           return math.max(minH, math.max(hCr, hDr));
         }
 
@@ -3181,22 +3485,50 @@ class RojmelEngine extends ChangeNotifier {
         for (int k = 0; k < alignedSlots.length; k++) {
           totalContentMm += computeSlotContentMm(k, crFontPt, drFontPt);
         }
-        double totalNeededMm = totalContentMm + alignedSlots.length * gapMm;
 
-        final hasManualCountOnPair = (getCreditPageEntryCount(acc, creditPageNo, pairKey) ?? 0) > 0;
-        if ((autoShrinkBigEntry || hasManualCountOnPair) && totalNeededMm > drSafeBudgetMm && alignedSlots.isNotEmpty) {
-          final targetContentBudget = math.max(70.0, drSafeBudgetMm - alignedSlots.length * math.min(gapMm, 3.0));
-          if (totalContentMm > targetContentBudget) {
-            final scale = (targetContentBudget / totalContentMm).clamp(0.62, 1.0);
-            crFontPt = math.max(6.2, double.parse((crFontPt * scale).toStringAsFixed(2)));
-            drFontPt = math.max(6.2, double.parse((drFontPt * scale).toStringAsFixed(2)));
-            totalContentMm = 0.0;
-            for (int k = 0; k < alignedSlots.length; k++) {
-              totalContentMm += computeSlotContentMm(k, crFontPt, drFontPt);
-            }
+        final manualCountVal = getCreditPageEntryCount(acc, creditPageNo, pairKey) ?? 0;
+        final hasManualCountOnPair = manualCountVal > 0;
+        final minGapPerRowMm = 2.5;
+        final maxContentBudgetMm = math.max(85.0, drSafeBudgetMm - alignedSlots.length * minGapPerRowMm);
+
+        // Only shrink font size if the actual text content exceeds maxContentBudgetMm
+        if ((autoShrinkBigEntry || hasManualCountOnPair || alignedSlots.length >= 6) &&
+            totalContentMm > maxContentBudgetMm &&
+            alignedSlots.isNotEmpty) {
+          final scale = (maxContentBudgetMm / totalContentMm).clamp(0.68, 1.0);
+          crFontPt = math.max(6.8, double.parse((crFontPt * scale).toStringAsFixed(2)));
+          drFontPt = math.max(6.8, double.parse((drFontPt * scale).toStringAsFixed(2)));
+          totalContentMm = 0.0;
+          for (int k = 0; k < alignedSlots.length; k++) {
+            totalContentMm += computeSlotContentMm(k, crFontPt, drFontPt);
           }
-          if (totalContentMm + alignedSlots.length * gapMm > drSafeBudgetMm) {
-            gapMm = math.max(0.0, double.parse(((drSafeBudgetMm - totalContentMm) / alignedSlots.length).toStringAsFixed(2)));
+        }
+
+        // Full-Page Coverage:
+        // - If user set Auto Full Page Gap (-1.0), OR
+        // - If user set a large gap (e.g. 50mm) where totalContentMm + N*gapMm > drSafeBudgetMm, OR
+        // - If page has >= 4 entries or a set entry count (e.g. 5 entries or 10 entries) so it should never stop at half a page:
+        // Distribute the full remaining vertical page height across the slots so the full page is covered professionally!
+        if (alignedSlots.isNotEmpty) {
+          final availForGapsMm = math.max(0.0, drSafeBudgetMm - totalContentMm);
+          final fullPageGapPerSlot = double.parse((availForGapsMm / alignedSlots.length).toStringAsFixed(2));
+          final shouldStretchToFullPage = isAutoFullPageGap ||
+              hasManualCountOnPair ||
+              alignedSlots.length >= 4 ||
+              rawGapMm >= 18.0 ||
+              (totalContentMm + alignedSlots.length * gapMm > drSafeBudgetMm);
+
+          if (shouldStretchToFullPage) {
+            if (!isAutoFullPageGap && rawGapMm >= 0 && rawGapMm < fullPageGapPerSlot && alignedSlots.length < 4 && !hasManualCountOnPair) {
+              gapMm = rawGapMm;
+            } else if (!isAutoFullPageGap && rawGapMm > 0 && rawGapMm <= fullPageGapPerSlot && !hasManualCountOnPair && alignedSlots.length < 6) {
+              // If user explicitly chose a smaller gap (e.g. 4mm) on a small page, respect it unless they chose >= 15mm or Auto Full Page
+              gapMm = rawGapMm >= 15.0 ? fullPageGapPerSlot : math.max(rawGapMm, fullPageGapPerSlot * 0.85);
+            } else {
+              gapMm = fullPageGapPerSlot;
+            }
+          } else if (totalContentMm + alignedSlots.length * gapMm > drSafeBudgetMm) {
+            gapMm = fullPageGapPerSlot;
           }
         }
 
@@ -3206,8 +3538,8 @@ class RojmelEngine extends ChangeNotifier {
         ];
 
         final avgSlotH = slotHeightsMm.isEmpty
-            ? 24.0
-            : (slotHeightsMm.reduce((a, b) => a + b) / slotHeightsMm.length).clamp(8.0, 36.0);
+            ? 28.0
+            : (slotHeightsMm.reduce((a, b) => a + b) / slotHeightsMm.length).clamp(10.0, 95.0);
         final crRowH = avgSlotH;
         final drRowH = avgSlotH;
 
@@ -3667,6 +3999,10 @@ class RojmelEngine extends ChangeNotifier {
           ? '<tr class="opening-row"><td class="date-cell"></td><td class="head-cell" colspan="2" style="text-align:left;padding-left:8px"><b>તારીખ - ${p.isFirstPageOfFY ? "01/04/$fyStartYr" : p.formattedDateSlash} &nbsp; - &nbsp; શ્રી ઉઘડતી સિલક</b></td>${numCellHtml(p.openCash)}${numCellHtml(p.openBank)}${numCellHtml(p.openTotal)}</tr>'
           : '<tr class="opening-row"><td class="date-cell">${p.formattedDateDDMMYY}</td><td class="head-cell"></td><td class="desc-cell"><b>શ્રી ઉઘડતી સિલક</b></td>${numCellHtml(p.openCash)}${numCellHtml(p.openBank)}${numCellHtml(p.openTotal)}</tr>';
 
+      final rawGapSetting = getCreditPageEntryGapMm(target, p.creditPageNo, p.pairKey);
+      final hasManualCnt = (getCreditPageEntryCount(target, p.creditPageNo, p.pairKey) ?? 0) > 0;
+      final fillFullPageFlag = (rawGapSetting < 0 || rawGapSetting >= 18.0 || hasManualCnt || p.alignedCredits.length >= 4) ? '1' : '0';
+
       String crRowsHtml = '';
       if (p.alignedCredits.isNotEmpty) {
         for (int idx = 0; idx < p.alignedCredits.length; idx++) {
@@ -3676,19 +4012,19 @@ class RojmelEngine extends ChangeNotifier {
             final c = cashAmt(e);
             final b = bankAmt(e);
             final dStr = mAcc.type == 'BANK' ? fmtDateSlashDDMMYYYY(e.date) : fmtDateDDMMYY(e.date);
-            crRowsHtml += '<tr class="entry-row" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell">$dStr</td><td class="head-cell">${_escHtml(e.head)}</td><td class="desc-cell">${_escHtml(formatCreditNarration(e))}</td>${numCellHtml(c)}${numCellHtml(b)}${numCellHtml(c + b)}</tr>';
+            crRowsHtml += '<tr class="entry-row" data-slot-mm="$slotH" data-gap-mm="${p.entryGapMm}" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell">$dStr</td><td class="head-cell">${_escHtml(e.head)}</td><td class="desc-cell">${_escHtml(formatCreditNarration(e))}</td>${numCellHtml(c)}${numCellHtml(b)}${numCellHtml(c + b)}</tr>';
           } else {
-            crRowsHtml += '<tr class="entry-row" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell"></td><td class="head-cell"></td><td class="desc-cell"></td><td class="num"></td><td class="num"></td><td class="num"></td></tr>';
+            crRowsHtml += '<tr class="entry-row" data-slot-mm="$slotH" data-gap-mm="${p.entryGapMm}" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell"></td><td class="head-cell"></td><td class="desc-cell"></td><td class="num"></td><td class="num"></td><td class="num"></td></tr>';
           }
         }
       } else if (mAcc.type == 'BANK') {
-        crRowsHtml = '<tr class="entry-row" style="--row-h:${p.crRowHeightMm}mm;--entry-gap:${p.entryGapMm}mm;height:${p.crRowHeightMm}mm"><td class="date-cell">${p.formattedDateSlash}</td><td class="head-cell">${_escHtml(p.fallbackHead)}</td><td class="desc-cell">આજની તારીખમાં કોઈ આવક થયેલ નથી</td>${numCellHtml(0)}${numCellHtml(0)}${numCellHtml(0)}</tr>';
+        crRowsHtml = '<tr class="entry-row" data-slot-mm="${p.crRowHeightMm}" data-gap-mm="${p.entryGapMm}" style="--row-h:${p.crRowHeightMm}mm;--entry-gap:${p.entryGapMm}mm;height:${p.crRowHeightMm}mm"><td class="date-cell">${p.formattedDateSlash}</td><td class="head-cell">${_escHtml(p.fallbackHead)}</td><td class="desc-cell">આજની તારીખમાં કોઈ આવક થયેલ નથી</td>${numCellHtml(0)}${numCellHtml(0)}${numCellHtml(0)}</tr>';
       }
 
       final crFillerHtml = (cashbookShowColumnLines && cashbookColumnLineMode == 'full_till_ekandar')
           ? '<tr class="filler-line-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>'
           : '';
-      sb.writeln('<section class="cash-demo-page credit-page $crParity$cbOrientCls" data-orientation="$cbOrient" data-kind="cr" data-rpt="daybook" style="--cash-font:${p.crFontPt}pt">'
+      sb.writeln('<section class="cash-demo-page credit-page $crParity$cbOrientCls" data-orientation="$cbOrient" data-kind="cr" data-rpt="daybook" data-fill-page="$fillFullPageFlag" style="--cash-font:${p.crFontPt}pt">'
           '<div class="cash-demo-top-wrap">${demoTopHeader("credit", p)}'
           '<table class="cash-demo-table">${demoColGroup("credit")}<thead>${demoHeadRow("credit", p)}</thead>'
           '<tbody>$openRowHtml$crRowsHtml$crFillerHtml</tbody></table></div>'
@@ -3709,13 +4045,13 @@ class RojmelEngine extends ChangeNotifier {
             final dStr = mAcc.type == 'BANK' ? fmtDateSlashDDMMYYYY(e.date) : fmtDateDDMMYY(e.date);
             final claimDisp = (isCashEntry(e) || isBankChargeEntry(e)) ? '' : _escHtml(fmtClaimWrapped(e.txn)).replaceAll('\n', '<br>');
             final settleDisp = isCashEntry(e) ? '' : (mAcc.type == 'BANK' ? fmtDateSlashDDMMYYYY(e.clearDate) : fmtDateDDMMYY(e.clearDate));
-            drRowsHtml += '<tr class="entry-row" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell">$dStr</td><td class="head-cell">${_escHtml(e.head)}</td><td class="desc-cell">${_escHtml(formatDebitNarration(e))}</td><td class="voucher-cell">${_escHtml(e.voucher.isNotEmpty ? e.voucher : e.manualVoucher)}</td><td class="claim-cell">$claimDisp</td><td class="settle-cell">$settleDisp</td>${numCellHtml(c)}${numCellHtml(b)}${numCellHtml(c + b)}</tr>';
+            drRowsHtml += '<tr class="entry-row" data-slot-mm="$slotH" data-gap-mm="${p.entryGapMm}" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell">$dStr</td><td class="head-cell">${_escHtml(e.head)}</td><td class="desc-cell">${_escHtml(formatDebitNarration(e))}</td><td class="voucher-cell">${_escHtml(e.voucher.isNotEmpty ? e.voucher : e.manualVoucher)}</td><td class="claim-cell">$claimDisp</td><td class="settle-cell">$settleDisp</td>${numCellHtml(c)}${numCellHtml(b)}${numCellHtml(c + b)}</tr>';
           } else {
-            drRowsHtml += '<tr class="entry-row" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell"></td><td class="head-cell"></td><td class="desc-cell"></td><td class="voucher-cell"></td><td class="claim-cell"></td><td class="settle-cell"></td><td class="num"></td><td class="num"></td><td class="num"></td></tr>';
+            drRowsHtml += '<tr class="entry-row" data-slot-mm="$slotH" data-gap-mm="${p.entryGapMm}" style="--row-h:${slotH}mm;--entry-gap:${p.entryGapMm}mm;height:${slotH}mm"><td class="date-cell"></td><td class="head-cell"></td><td class="desc-cell"></td><td class="voucher-cell"></td><td class="claim-cell"></td><td class="settle-cell"></td><td class="num"></td><td class="num"></td><td class="num"></td></tr>';
           }
         }
       } else if (mAcc.type == 'BANK') {
-        drRowsHtml = '<tr class="entry-row" style="--row-h:${p.drRowHeightMm}mm;--entry-gap:${p.entryGapMm}mm;height:${p.drRowHeightMm}mm"><td class="date-cell">${p.formattedDateSlash}</td><td class="head-cell">${_escHtml(p.fallbackHead)}</td><td class="desc-cell">આજની તારીખમાં કોઈ ખર્ચ થયેલ નથી</td><td class="voucher-cell"></td><td class="claim-cell"></td><td class="settle-cell"></td>${numCellHtml(0)}${numCellHtml(0)}${numCellHtml(0)}</tr>';
+        drRowsHtml = '<tr class="entry-row" data-slot-mm="${p.drRowHeightMm}" data-gap-mm="${p.entryGapMm}" style="--row-h:${p.drRowHeightMm}mm;--entry-gap:${p.entryGapMm}mm;height:${p.drRowHeightMm}mm"><td class="date-cell">${p.formattedDateSlash}</td><td class="head-cell">${_escHtml(p.fallbackHead)}</td><td class="desc-cell">આજની તારીખમાં કોઈ ખર્ચ થયેલ નથી</td><td class="voucher-cell"></td><td class="claim-cell"></td><td class="settle-cell"></td>${numCellHtml(0)}${numCellHtml(0)}${numCellHtml(0)}</tr>';
       }
 
       // Always output 9 <td></td> cells when column lines are enabled so Debit vertical column lines touch the <thead> double border just like Credit!
@@ -3725,7 +4061,7 @@ class RojmelEngine extends ChangeNotifier {
       final drFillerHtml = (cashbookShowColumnLines && cashbookColumnLineMode == 'full_till_ekandar')
           ? '<tr class="filler-line-row"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>'
           : '';
-      sb.writeln('<section class="cash-demo-page debit-page $drParity$cbOrientCls" data-orientation="$cbOrient" data-kind="dr" data-rpt="daybook" style="--cash-font:${p.drFontPt}pt">'
+      sb.writeln('<section class="cash-demo-page debit-page $drParity$cbOrientCls" data-orientation="$cbOrient" data-kind="dr" data-rpt="daybook" data-fill-page="$fillFullPageFlag" style="--cash-font:${p.drFontPt}pt">'
           '<div class="cash-demo-top-wrap">${demoTopHeader("debit", p)}'
           '<table class="cash-demo-table">${demoColGroup("debit")}<thead>${demoHeadRow("debit", p)}</thead>'
           '<tbody>$drSpacerHtml$drRowsHtml$drFillerHtml</tbody></table></div>'
@@ -3737,7 +4073,7 @@ class RojmelEngine extends ChangeNotifier {
           '</tbody></table>'
           '<div class="cash-demo-page-number">Page Number - ${p.debitPageNo}</div></div></section>');
     }
-    sb.writeln('<script>(function(){function fitNums(){var cells=document.querySelectorAll(".num,.sum-num,.claim-cell,.voucher-cell,.date-cell,.settle-cell");for(var i=0;i<cells.length;i++){var td=cells[i];var fs=parseFloat(window.getComputedStyle(td).fontSize)||12;while(td.scrollWidth>td.clientWidth&&fs>6.2){fs-=0.35;td.style.fontSize=fs+"px";}}var pages=document.querySelectorAll("section.cash-demo-page");for(var p=0;p+1<pages.length;p+=2){var crPage=pages[p];var drPage=pages[p+1];if(!crPage.classList.contains("credit-page")||!drPage.classList.contains("debit-page"))continue;var crThead=crPage.querySelector("thead tr");var drThead=drPage.querySelector("thead tr");if(crThead&&drThead){var thH=Math.max(crThead.offsetHeight,drThead.offsetHeight);crThead.style.height=thH+"px";drThead.style.height=thH+"px";}var openRow=crPage.querySelector("tr.opening-row");var spacerRow=drPage.querySelector("tr.debit-spacer-row");if(openRow&&spacerRow){var opH=Math.max(openRow.offsetHeight,spacerRow.offsetHeight);openRow.style.height=opH+"px";spacerRow.style.height=opH+"px";for(var c=0;c<spacerRow.children.length;c++){spacerRow.children[c].style.height=opH+"px";}}var crRows=crPage.querySelectorAll("tr.entry-row");var drRows=drPage.querySelectorAll("tr.entry-row");var count=Math.min(crRows.length,drRows.length);for(var r=0;r<count;r++){crRows[r].style.height="auto";drRows[r].style.height="auto";for(var a=0;a<crRows[r].children.length;a++){crRows[r].children[a].style.height="auto";}for(var b=0;b<drRows[r].children.length;b++){drRows[r].children[b].style.height="auto";}var h=Math.max(crRows[r].offsetHeight,drRows[r].offsetHeight);crRows[r].style.height=h+"px";drRows[r].style.height=h+"px";for(var a2=0;a2<crRows[r].children.length;a2++){crRows[r].children[a2].style.height=h+"px";}for(var b2=0;b2<drRows[r].children.length;b2++){drRows[r].children[b2].style.height=h+"px";}}}var fillers=document.querySelectorAll("tr.filler-line-row");for(var j=0;j<fillers.length;j++){var tr=fillers[j];var topWrap=tr.closest(".cash-demo-top-wrap");var tbl=tr.closest("table");if(topWrap&&tbl){tr.style.height="0px";for(var k0=0;k0<tr.children.length;k0++){tr.children[k0].style.height="0px";}var avail=topWrap.clientHeight-tbl.offsetTop-tbl.offsetHeight;if(avail>0){tr.style.height=avail+"px";for(var k=0;k<tr.children.length;k++){tr.children[k].style.height=avail+"px";}}}}}fitNums();window.fitNums=fitNums;window.onload=function(){fitNums();};})();</script></body></html>');
+    sb.writeln('<script>(function(){function fitNums(){var mmPx=3.7795;var pages=document.querySelectorAll("section.cash-demo-page");for(var p=0;p+1<pages.length;p+=2){var crPage=pages[p];var drPage=pages[p+1];if(!crPage.classList.contains("credit-page")||!drPage.classList.contains("debit-page"))continue;var crThead=crPage.querySelector("thead tr");var drThead=drPage.querySelector("thead tr");var thH=42;if(crThead&&drThead){thH=Math.max(crThead.offsetHeight,drThead.offsetHeight);crThead.style.height=thH+"px";drThead.style.height=thH+"px";}var openRow=crPage.querySelector("tr.opening-row");var spacerRow=drPage.querySelector("tr.debit-spacer-row");var opH=22;if(openRow&&spacerRow){opH=Math.max(openRow.offsetHeight,spacerRow.offsetHeight);openRow.style.height=opH+"px";spacerRow.style.height=opH+"px";for(var c=0;c<spacerRow.children.length;c++){spacerRow.children[c].style.height=opH+"px";}}var crTopWrap=crPage.querySelector(".cash-demo-top-wrap");var drTopWrap=drPage.querySelector(".cash-demo-top-wrap");var crTbl=crPage.querySelector("table.cash-demo-table");var drTbl=drPage.querySelector("table.cash-demo-table");var availCr=(crTopWrap&&crTbl)?(crTopWrap.clientHeight-crTbl.offsetTop-thH-opH-4):840;var availDr=(drTopWrap&&drTbl)?(drTopWrap.clientHeight-drTbl.offsetTop-thH-opH-4):840;var availBodyPx=Math.max(320,Math.min(availCr,availDr));var crRows=crPage.querySelectorAll("tr.entry-row");var drRows=drPage.querySelectorAll("tr.entry-row");var count=Math.min(crRows.length,drRows.length);if(count>0){function measureNat(){var arr=[];var sum=0;for(var r=0;r<count;r++){crRows[r].style.height="auto";drRows[r].style.height="auto";for(var a=0;a<crRows[r].children.length;a++){crRows[r].children[a].style.height="auto";crRows[r].children[a].style.paddingBottom="2px";}for(var b=0;b<drRows[r].children.length;b++){drRows[r].children[b].style.height="auto";drRows[r].children[b].style.paddingBottom="2px";}var nh=Math.max(crRows[r].offsetHeight,drRows[r].offsetHeight,22);arr.push(nh);sum+=nh;}return {arr:arr,sum:sum};}var m=measureNat();var curFontPt=parseFloat(crPage.style.getPropertyValue("--cash-font"))||10;while(m.sum>availBodyPx*0.92&&curFontPt>6.5){curFontPt=Math.max(6.5,curFontPt-0.4);crPage.style.setProperty("--cash-font",curFontPt+"pt");drPage.style.setProperty("--cash-font",curFontPt+"pt");m=measureNat();}var natH=m.arr;var sumNat=m.sum;var fillPage=crPage.getAttribute("data-fill-page")==="1";var wantH=[];var sumWant=0;for(var r2=0;r2<count;r2++){var gapMm=parseFloat(crRows[r2].getAttribute("data-gap-mm"))||4;var gapPx=Math.max(4,gapMm*mmPx);var w=natH[r2]+gapPx;wantH.push(w);sumWant+=w;}var remPx=Math.max(0,availBodyPx-sumNat);var useFullPage=fillPage||(sumWant>availBodyPx);var extraPerRow=useFullPage?Math.floor(remPx/count):0;for(var r3=0;r3<count;r3++){var finalH=useFullPage?(natH[r3]+extraPerRow):wantH[r3];var padB=Math.max(2,finalH-natH[r3]);crRows[r3].style.height=finalH+"px";drRows[r3].style.height=finalH+"px";for(var a2=0;a2<crRows[r3].children.length;a2++){crRows[r3].children[a2].style.height=finalH+"px";crRows[r3].children[a2].style.paddingBottom=padB+"px";}for(var b2=0;b2<drRows[r3].children.length;b2++){drRows[r3].children[b2].style.height=finalH+"px";drRows[r3].children[b2].style.paddingBottom=padB+"px";}}}}var cells=document.querySelectorAll(".num,.sum-num,.claim-cell,.voucher-cell,.date-cell,.settle-cell");for(var i=0;i<cells.length;i++){var td=cells[i];var fs=parseFloat(window.getComputedStyle(td).fontSize)||12;while(td.scrollWidth>td.clientWidth&&fs>6.2){fs-=0.35;td.style.fontSize=fs+"px";}}var fillers=document.querySelectorAll("tr.filler-line-row");for(var j=0;j<fillers.length;j++){var tr=fillers[j];var topWrap=tr.closest(".cash-demo-top-wrap");var tbl=tr.closest("table");if(topWrap&&tbl){tr.style.height="0px";for(var k0=0;k0<tr.children.length;k0++){tr.children[k0].style.height="0px";}var avail=topWrap.clientHeight-tbl.offsetTop-tbl.offsetHeight;if(avail>0){tr.style.height=avail+"px";for(var k=0;k<tr.children.length;k++){tr.children[k].style.height=avail+"px";}}}}}fitNums();window.fitNums=fitNums;window.onload=function(){fitNums();};})();</script></body></html>');
     return applySetup ? applyPrintSetup(sb.toString()) : sb.toString();
   }
 
@@ -6294,6 +6630,7 @@ class RojmelEngine extends ChangeNotifier {
       'pageEntryGapMap': pageEntryGapMap,
       'cashbookColumnLineMode': cashbookColumnLineMode,
       'selectedMonthlyLimitMonth': selectedMonthlyLimitMonth,
+      'lockedAccountFys': lockedAccountFys.toList(),
     });
   }
 }
@@ -6425,6 +6762,11 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
   final _snaDebit60SuffixCtrl = TextEditingController(text: '(વાઉચરના 60% લેખે)');
   final _snaDebit40SuffixCtrl = TextEditingController(text: '(વાઉચરના 40% લેખે)');
   String _entryType = 'credit';
+  /// Only used when the selected account is PFMS or SNA SPARSH (`m.isSnaOrPfms == true`).
+  /// Never active for BANK accounts (`m.type == 'BANK'`).
+  bool _pfmsSnaCombinedEntryMode = false;
+  final _combinedCreditNarrCtrl = TextEditingController(text: 'ગ્રાન્ટ જમા થઈ');
+  final _combinedCreditPartyCtrl = TextEditingController(text: 'SSA');
   String? _entrySelectedHead;
   String _entryMedium = 'SNA SPARSH';
   bool _entryEditAllowed = true;
@@ -7208,6 +7550,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
     final clearCtrl = TextEditingController(text: fmtDateSlashDDMMYYYY(e.clearDate));
     final partyCtrl = TextEditingController(text: e.party);
     var deadStock = e.deadStock;
+    var applyVoucherToPair = e.splitGroup.isNotEmpty && e.splitPercent.round() == 60;
 
     await showDialog<void>(
       context: context,
@@ -7281,6 +7624,17 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                       Expanded(child: _labeledInput('Cheque / PFMS / Claim No.', txnCtrl)),
                     ],
                   ),
+                  if (selType == 'debit' && e.splitGroup.isNotEmpty)
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      value: applyVoucherToPair,
+                      onChanged: (v) => setModalState(() => applyVoucherToPair = v ?? false),
+                      title: const Text(
+                        '\u0A86 \u0A9C \u0AB5\u0ABE\u0A89\u0A9A\u0AB0 \u0AA8\u0A82\u0AAC\u0AB0 \u0A9C\u0ACB\u0AA1\u0AC0\u0AA6\u0ABE\u0AB0 60%/40% \u0A8F\u0AA8\u0ACD\u0A9F\u0ACD\u0AB0\u0AC0\u0AAE\u0ABE\u0A82 \u0AAA\u0AA3 \u0AB2\u0ABE\u0A97\u0AC1 \u0A95\u0AB0\u0ACB (Uncheck = \u0A85\u0AB2\u0A97 \u0AB5\u0ABE\u0A89\u0A9A\u0AB0 \u0AA8\u0A82\u0AAC\u0AB0)',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5),
+                      ),
+                    ),
                   const SizedBox(height: 10),
                   Row(
                     children: [
@@ -7328,6 +7682,11 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                   ..clearDate = clearCtrl.text.trim()
                   ..party = partyCtrl.text.trim()
                   ..deadStock = e.type == 'debit' && deadStock;
+                final origGroup = e.splitGroup;
+                final voucherEdited = selType == 'debit' && v != e.voucher;
+                if (voucherEdited && origGroup.isNotEmpty && !applyVoucherToPair) {
+                  updated.splitGroup = '';
+                }
                 final err = engine.updateEntry(updated);
                 if (err != null) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -7335,8 +7694,18 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                   );
                   return;
                 }
+                if (voucherEdited && origGroup.isNotEmpty && applyVoucherToPair) {
+                  for (final other in engine.entries) {
+                    if (other.id != updated.id && other.account == updated.account && other.splitGroup == origGroup && other.type == 'debit') {
+                      other.voucher = v;
+                      other.manualVoucher = v;
+                    }
+                  }
+                  engine.renumberVouchers(forceRecalc: false, accountOnly: updated.account);
+                  engine.triggerUpdate();
+                }
                 Navigator.of(ctx).pop();
-                _showToast('Transaction updated and all pages recalculated.');
+                _showToast('Transaction updated and all reports/pages recalculated.');
               },
               child: const Text('💾 Save Entry & Recalculate All Pages'),
             ),
@@ -7347,6 +7716,190 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
   }
 
   /// Modal D: Two-Time Confirmation to Delete All Entries of Selected Account Only (For Next Year Use)
+  Future<void> _repairVouchersAndSaveCloud([String? accOverride]) async {
+    final acc = accOverride ?? engine.selectedAccount;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          '\u{1F527} Repair & Renumber Vouchers (1, 2, 3...) + Cloud Save',
+          style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w800, color: Color(0xFF11345F)),
+        ),
+        content: SizedBox(
+          width: 520,
+          child: Text(
+            'This repairs collided IDs/60:40 pairs and renumbers all Debit vouchers of "$acc" strictly sequentially (1, 2, 3...) matching Cashbook order, then saves directly to Cloud.\n\n'
+            '- Valid 60%+40% SNA pairs keep the same voucher number.\n'
+            '- Different claim numbers of the same percentage get separate sequential vouchers.\n'
+            '- Zero changes to any Rupee amount or balance.',
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF087F5B)),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Repair, Renumber & Save to Cloud'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final fixes = engine.repairDuplicateIdsAndSplitGroups(accountOnly: acc);
+    engine.renumberVouchers(forceRecalc: true, accountOnly: acc);
+    engine.triggerUpdate();
+    await _flushCloudSave();
+    _showToast('Repaired ($fixes fixes), renumbered vouchers continuously for "$acc", and saved to Cloud!');
+  }
+
+  Future<void> _openFreezeAuditedFyModal([String? accOverride]) async {
+    final acc = accOverride ?? engine.selectedAccount;
+    final m = engine.getAccountMeta(acc);
+    final accEntries = engine.getSortedEntries(engine.getAccountEntries(acc));
+    final detectedFy = (accEntries.isNotEmpty && RojmelEngine.financialYearFromDate(accEntries.first.date).isNotEmpty)
+        ? RojmelEngine.financialYearFromDate(accEntries.first.date)
+        : engine.financialYear;
+    final nextFyCtrl = TextEditingController(text: engine.nextFinancialYearLabel(detectedFy));
+    final preview = engine.buildFrozenFyArchiveSnapshot(acc, targetFy: detectedFy);
+    final totals = (preview['totals'] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          '\u{1F512} \u0AA8\u0ABE\u0AA3\u0ABE\u0A95\u0AC0\u0AAF \u0AB5\u0AB0\u0ACD\u0AB7 \u0AAB\u0ACD\u0AB0\u0AC0\u0A9D \u0A95\u0AB0\u0ACB \u0A85\u0AA8\u0AC7 \u0AA8\u0AB5\u0AC1\u0A82 \u0AB5\u0AB0\u0ACD\u0AB7 \u0AB6\u0AB0\u0AC2 \u0A95\u0AB0\u0ACB (Freeze Audited FY)',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF087F5B)),
+        ),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Account: $acc (${m.type})  |  Freeze FY: $detectedFy  |  Entries: ${preview['entryCount']}',
+                  style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF10233F)),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: m.type == 'BANK' ? const Color(0xFFE7F5FF) : const Color(0xFFFFF3BF),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    m.type == 'BANK'
+                        ? 'BANK \u0A96\u0ABE\u0AA4\u0AC1\u0A82: \u0AB9\u0ABE\u0AB2\u0AA8\u0ABE \u0AB5\u0AB0\u0ACD\u0AB7\u0AA8\u0AC0 \u0AA4\u0AAE\u0ABE\u0AAE \u0AB9\u0AC7\u0AA1-\u0AB5\u0ABE\u0A88\u0A9D \u0AB0\u0ACB\u0A95\u0AA1 \u0A85\u0AA8\u0AC7 \u0AAC\u0AC7\u0A82\u0A95 \u0AAC\u0A82\u0AA7 \u0AB8\u0ABF\u0AB2\u0A95 (Closing Balance) \u0AA8\u0AB5\u0ABE \u0AB5\u0AB0\u0ACD\u0AB7\u0AA8\u0AC0 \u0A89\u0A98\u0AA1\u0AA4\u0AC0 \u0AB8\u0ABF\u0AB2\u0A95 (Opening Balance) \u0AA4\u0AB0\u0AC0\u0A95\u0AC7 \u0A86\u0AAA\u0ACB\u0A86\u0AAA \u0A9C\u0AB6\u0AC7, \u0A85\u0AA8\u0AC7 \u0A9C\u0AC2\u0AA8\u0AC1\u0A82 \u0AB5\u0AB0\u0ACD\u0AB7 Read-Only Archive \u0AAE\u0ABE\u0A82 \u0AB8\u0A9A\u0AB5\u0ABE\u0AB6\u0AC7.\n\n'
+                          'Carry-Forward Closing -> Next Opening: Cash = ${fmtDemoNum((totals['closeCash'] as num?)?.toDouble() ?? 0.0)} | Bank = ${fmtDemoNum((totals['closeBank'] as num?)?.toDouble() ?? 0.0)}'
+                        : 'SNA SPARSH / PFMS \u0A96\u0ABE\u0AA4\u0AC1\u0A82: \u0AA8\u0AB5\u0ABE \u0AB5\u0AB0\u0ACD\u0AB7\u0AA8\u0AC0 \u0A89\u0A98\u0AA1\u0AA4\u0AC0 \u0AB8\u0ABF\u0AB2\u0A95 \u20B90.00 \u0AB0\u0AB9\u0AC7\u0AB6\u0AC7 (\u0AB8\u0ABF\u0AB2\u0A95 \u0A95\u0AC7\u0AB0\u0AC0-\u0AAB\u0ACB\u0AB0\u0AB5\u0AB0\u0ACD\u0AA1 \u0AA8\u0AB9\u0AC0\u0A82 \u0AA5\u0ABE\u0AAF). \u0AA4\u0AAE\u0ABE\u0AAE \u0A97\u0ACD\u0AB0\u0ABE\u0AA8\u0ACD\u0A9F \u0AB9\u0AC7\u0AA1 \u0A85\u0AA8\u0AC7 \u0AA4\u0AC7\u0AAE\u0AA8\u0AC0 \u0AB5\u0ABE\u0AB0\u0ACD\u0AB7\u0ABF\u0A95 \u0AAE\u0AB0\u0ACD\u0AAF\u0ABE\u0AA6\u0ABE (Annual Limits) \u0AA8\u0AB5\u0ABE \u0AB5\u0AB0\u0ACD\u0AB7 \u0AAE\u0ABE\u0A9F\u0AC7 \u0A8F \u0A9C \u0AB8\u0A9A\u0AB5\u0ABE\u0AB6\u0AC7, \u0A85\u0AA8\u0AC7 \u0A9C\u0AC2\u0AA8\u0AC1\u0A82 \u0AB5\u0AB0\u0ACD\u0AB7 Read-Only Archive \u0AAE\u0ABE\u0A82 \u0AB8\u0A9A\u0AB5\u0ABE\u0AB6\u0AC7.\n\n'
+                          'Preserved Grant Heads: ${engine.getAccountSpecificHeads(acc).length} | Preserved Annual Limits: ${m.headLimits.length}',
+                    style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: Color(0xFF10233F)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _labeledInput('Next Financial Year (YYYY-YY, e.g. 2026-27) *', nextFyCtrl),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF087F5B)),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('\u{1F512} Freeze FY, Carry Forward & Save to Cloud'),
+          ),
+        ],
+      ),
+    );
+    if (proceed != true || !mounted) return;
+    final nextFy = nextFyCtrl.text.trim();
+    if (!RegExp(r'^\d{4}-\d{2}$').hasMatch(nextFy)) {
+      _showToast('Enter Next Financial Year in YYYY-YY format (e.g. 2026-27).');
+      return;
+    }
+    try {
+      await _rojmelService.saveFrozenFyArchive(
+        schoolRef: _schoolRef,
+        financialYear: detectedFy,
+        accountName: acc,
+        archivePayload: preview,
+      );
+      engine.applyFyCarryForwardAfterArchive(
+        acc,
+        frozenFy: detectedFy,
+        nextFinancialYear: nextFy,
+      );
+      await _flushCloudSave();
+      _showToast('FY $detectedFy frozen to read-only archive for "$acc", carried forward to $nextFy, and saved to Cloud!');
+    } catch (err) {
+      _showToast('FY Freeze failed (active data unchanged): $err');
+    }
+  }
+
+  Future<void> _openFrozenFyArchivesModal() async {
+    try {
+      final list = await _rojmelService.listFrozenFyArchives(_schoolRef);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text(
+            '\u{1F4E6} \u0AAB\u0ACD\u0AB0\u0AC0\u0A9D \u0AA5\u0AAF\u0AC7\u0AB2\u0ABE \u0AA8\u0ABE\u0AA3\u0ABE\u0A95\u0AC0\u0AAF \u0AB5\u0AB0\u0ACD\u0AB7\u0ACB (Read-Only Audited FY Archives)',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF11345F)),
+          ),
+          content: SizedBox(
+            width: 600,
+            height: 380,
+            child: list.isEmpty
+                ? const Center(child: Text('No frozen Financial Year archives yet.'))
+                : ListView.separated(
+                    itemCount: list.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (_, idx) {
+                      final item = list[idx];
+                      final totals = item['totals'] is Map ? Map<String, dynamic>.from(item['totals'] as Map) : <String, dynamic>{};
+                      final closeTot = (totals['closeTotal'] as num?)?.toDouble() ?? 0.0;
+                      return ListTile(
+                        leading: const Icon(Icons.lock_rounded, color: Color(0xFF087F5B)),
+                        title: Text(
+                          '${item['financial_year']} — ${item['account_name']} (${item['account_type']})',
+                          style: const TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                        subtitle: Text(
+                          'Entries: ${item['entry_count'] ?? 0} | Closing Balance: ${fmtDemoNum(closeTot)} | Frozen: ${item['frozen_at'] ?? ''}',
+                        ),
+                        trailing: OutlinedButton.icon(
+                          icon: const Icon(Icons.download_rounded, size: 16),
+                          label: const Text('JSON'),
+                          onPressed: () async {
+                            final full = await _rojmelService.loadFrozenFyArchive('${item['id']}');
+                            if (full == null) return;
+                            final bytes = Uint8List.fromList(utf8.encode(const JsonEncoder.withIndent('  ').convert(full)));
+                            await PsmFileExportHelper.saveOrShare(
+                              bytes: bytes,
+                              filename: 'Rojmel_Frozen_${item['financial_year']}_${item['account_name']}.json',
+                              title: 'Frozen FY ${item['financial_year']}',
+                              mimeType: 'application/json',
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close')),
+          ],
+        ),
+      );
+    } catch (err) {
+      _showToast('Could not load frozen archives: $err');
+    }
+  }
+
   Future<void> _openDeleteAllAccountEntriesModal([String? accOverride]) async {
     final acc = accOverride ?? engine.selectedAccount;
     final m = engine.getAccountMeta(acc);
@@ -7862,21 +8415,23 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                       }).toList(),
                     ),
                     const SizedBox(height: 12),
-                    const Text(
-                      '📏 Gap Between Two Entries on This Page (બે એન્ટ્રી વચ્ચે જગ્યા - mm):',
-                      style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w900, color: Color(0xFF0E3360)),
-                    ),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: const <double>[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 18, 20, 25].map((g) {
-                        return ChoiceChip(
-                          label: Text('${g.toStringAsFixed(0)} mm'),
-                          selected: (thisPageGapMm - g).abs() < 0.2,
-                          onSelected: (_) => setModalState(() => thisPageGapMm = g),
-                        );
-                      }).toList(),
+                    DropdownButtonFormField<double>(
+                      isExpanded: true,
+                      value: _nearestGapOption(thisPageGapMm),
+                      decoration: const InputDecoration(
+                        labelText: '📏 Gap Between Two Entries on This Page (બે એન્ટ્રી વચ્ચે જગ્યા - mm)',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      items: _kCashbookGapDropdownOptions
+                          .map((g) => DropdownMenuItem<double>(
+                                value: g,
+                                child: Text(_gapDropdownLabel(g)),
+                              ))
+                          .toList(),
+                      onChanged: (v) {
+                        if (v != null) setModalState(() => thisPageGapMm = v);
+                      },
                     ),
                     const SizedBox(height: 10),
                     TitleWithActions(
@@ -9685,7 +10240,16 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                           _showToast('Switched active account to "$n".');
                         }),
                         _htmlBtn('Edit / Heads / Limits', const Color(0xFFE8F0FA), const Color(0xFF164B80), () => _loadAccountIntoForm(n)),
+                        _htmlBtn('📥 ગ્રાન્ટ હેડ ટેમ્પ્લેટ', const Color(0xFF087F5B), Colors.white, () {
+                          engine.selectAccount(n);
+                          _downloadGrantHeadsExcelTemplate(n);
+                        }),
+                        _htmlBtn('📤 ગ્રાન્ટ હેડ Excel અપલોડ', const Color(0xFF0B4F6C), Colors.white, () {
+                          engine.selectAccount(n);
+                          _uploadGrantHeadsExcel(n);
+                        }),
                         _htmlBtn('🧹 Clear Entries (2x Confirm)', const Color(0xFFFFF3BF), const Color(0xFF754600), () => _openDeleteAllAccountEntriesModal(n)),
+                  _htmlBtn('\u{1F512} FY \u0AAB\u0ACD\u0AB0\u0AC0\u0A9D \u0A85\u0AA8\u0AC7 \u0AA8\u0AB5\u0AC1\u0A82 \u0AB5\u0AB0\u0ACD\u0AB7 (Freeze FY)', const Color(0xFFD3F9D8), const Color(0xFF087F5B), () => _openFreezeAuditedFyModal(n)),
                         _htmlBtn('Delete', const Color(0xFFFFE3E3), const Color(0xFFC92A2A), () {
                           final err = engine.deleteAccountIfEmpty(n);
                           if (err != null) _showToast(err);
@@ -9857,6 +10421,24 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                   _htmlBtn('📥 Get Grant Heads from Another Account (All or Selected)', const Color(0xFFFFF3BF), const Color(0xFF754600), () {
                     _openCopyGrantHeadsModal(activeAcc);
                   }),
+                  _htmlBtn(
+                    engine.getAccountMeta(activeAcc).isSnaOrPfms
+                        ? '📥 ગ્રાન્ટ હેડ Excel ટેમ્પ્લેટ ડાઉનલોડ (વાર્ષિક લિમિટ + સૂચના શીટ)'
+                        : '📥 ગ્રાન્ટ હેડ Excel ટેમ્પ્લેટ ડાઉનલોડ (ઉઘડતી સિલક + સૂચના શીટ)',
+                    const Color(0xFF087F5B),
+                    Colors.white,
+                    () => _downloadGrantHeadsExcelTemplate(activeAcc),
+                  ),
+                  _htmlBtn(
+                    _grantHeadExcelBusy
+                        ? '⏳ અપલોડ ચાલુ છે...'
+                        : (engine.getAccountMeta(activeAcc).isSnaOrPfms
+                            ? '📤 ભરેલું ગ્રાન્ટ હેડ Excel અપલોડ કરો (વાર્ષિક લિમિટ સાથે)'
+                            : '📤 ભરેલું ગ્રાન્ટ હેડ Excel અપલોડ કરો (ઉઘડતી સિલક સાથે)'),
+                    const Color(0xFF0B4F6C),
+                    Colors.white,
+                    () => _uploadGrantHeadsExcel(activeAcc),
+                  ),
                 ],
               ),
             ],
@@ -9978,10 +10560,18 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
       _entryMedium = modeOptions.first;
     }
 
-    final isDebit = _entryType == 'debit';
-    final isCashMode = _entryMedium.toLowerCase() == 'cash';
-    final isSNAMode = m.isAnySna && _entryMedium == 'SNA SPARSH';
     final showLim = m.isSnaOrPfms;
+    // Strictly never enable combined mode for BANK accounts
+    final isCombinedMode = showLim && _pfmsSnaCombinedEntryMode;
+    if (isCombinedMode && _entryMedium.toLowerCase() == 'cash') {
+      _entryMedium = m.isAnySna ? 'SNA SPARSH' : 'PFMS';
+    }
+    final isDebit = isCombinedMode || _entryType == 'debit';
+    final isCashMode = !isCombinedMode && _entryMedium.toLowerCase() == 'cash';
+    final isSNAMode = m.isAnySna && _entryMedium == 'SNA SPARSH';
+    final effectiveModeOptions = isCombinedMode
+        ? modeOptions.where((x) => x.toLowerCase() != 'cash').toList()
+        : modeOptions;
 
     final totalAmt = double.tryParse(_entryAmtCtrl.text.trim()) ?? 0.0;
     final a60 = (totalAmt * 60.0).roundToDouble() / 100.0;
@@ -10106,6 +10696,81 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
           body: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (showLim) ...[
+                Container(
+                  margin: const EdgeInsets.only(bottom: 14),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isCombinedMode ? const Color(0xFFECFDF5) : const Color(0xFFF8FAFC),
+                    border: Border.all(
+                      color: isCombinedMode ? const Color(0xFF059669) : const Color(0xFF94A3B8),
+                      width: 1.8,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'PFMS / SNA SPARSH એન્ટ્રી મોડ પસંદ કરો (Entry Mode Toggle — BANK ખાતાને કોઈ અસર નહીં):',
+                        style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w900, color: Color(0xFF10233F)),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 8,
+                        children: [
+                          ChoiceChip(
+                            selected: !isCombinedMode,
+                            selectedColor: const Color(0xFF185D98),
+                            labelStyle: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: !isCombinedMode ? Colors.white : const Color(0xFF10233F),
+                            ),
+                            label: const Text('🔄 જમા અને ઉધાર જુદી જુદી એન્ટ્રી (Separate Credit / Debit — Cash/Padar માટે)'),
+                            onSelected: (_) {
+                              setState(() {
+                                _pfmsSnaCombinedEntryMode = false;
+                                _entryNoticeMsg = null;
+                              });
+                            },
+                          ),
+                          ChoiceChip(
+                            selected: isCombinedMode,
+                            selectedColor: const Color(0xFF087F5B),
+                            labelStyle: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: isCombinedMode ? Colors.white : const Color(0xFF065F46),
+                            ),
+                            label: const Text('⚡ જમા + ઉધાર એકસાથે (Same-Date Credit + Debit Together)'),
+                            onSelected: (_) {
+                              setState(() {
+                                _pfmsSnaCombinedEntryMode = true;
+                                if (_entryMedium.toLowerCase() == 'cash') {
+                                  _entryMedium = m.isAnySna ? 'SNA SPARSH' : 'PFMS';
+                                }
+                                if (_combinedCreditNarrCtrl.text.trim().isEmpty) {
+                                  _combinedCreditNarrCtrl.text = 'ગ્રાન્ટ જમા થઈ';
+                                }
+                                if (_combinedCreditPartyCtrl.text.trim().isEmpty) {
+                                  _combinedCreditPartyCtrl.text = 'SSA';
+                                }
+                                if (_entryNarrCtrl.text.trim() == 'ગ્રાન્ટ જમા થઈ') {
+                                  _entryNarrCtrl.clear();
+                                }
+                                if (_entryPartyCtrl.text.trim() == 'SSA') {
+                                  _entryPartyCtrl.clear();
+                                }
+                                _entryNoticeMsg = null;
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               Wrap(
                 spacing: 12,
                 runSpacing: 12,
@@ -10132,7 +10797,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                       onChanged: (v) {
                         setState(() {
                           _entrySelectedHead = v;
-                          if (_entryType == 'credit' && _entryNarrCtrl.text.trim().isEmpty) {
+                          if (!isCombinedMode && _entryType == 'credit' && _entryNarrCtrl.text.trim().isEmpty) {
                             _entryNarrCtrl.text = 'ગ્રાન્ટ જમા થઈ';
                             if (_entryPartyCtrl.text.trim().isEmpty) _entryPartyCtrl.text = 'SSA';
                           }
@@ -10143,7 +10808,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                   SizedBox(
                     width: 210,
                     child: _labeledDateInput(
-                      '3. Transaction Date *',
+                      isCombinedMode ? '3. જમા + ઉધાર તારીખ (Same Date) *' : '3. Transaction Date *',
                       _entryDateCtrl,
                       onChanged: (v) {
                         engine.syncFinancialYearFromDate(v);
@@ -10161,29 +10826,58 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                       autoFy.isNotEmpty ? autoFy : engine.financialYear,
                     ),
                   ),
-                  SizedBox(
-                    width: 210,
-                    child: DropdownButtonFormField<String>(
-                      isExpanded: true,
-                      value: _entryType,
-                      decoration: const InputDecoration(labelText: '4. Credit / Debit *', border: OutlineInputBorder(), isDense: true),
-                      items: const [
-                        DropdownMenuItem(value: 'credit', child: Text('Credit / આવક')),
-                        DropdownMenuItem(value: 'debit', child: Text('Debit / જાવક')),
-                      ],
-                      onChanged: (v) => setState(() {
-                        _entryType = v!;
-                        // 5B is used only by Debit (Kharch Patrak).
-                        if (_entryType != 'debit') _entryExpShortCtrl.clear();
-                      }),
+                  if (!isCombinedMode)
+                    SizedBox(
+                      width: 210,
+                      child: DropdownButtonFormField<String>(
+                        isExpanded: true,
+                        value: _entryType,
+                        decoration: const InputDecoration(labelText: '4. Credit / Debit *', border: OutlineInputBorder(), isDense: true),
+                        items: const [
+                          DropdownMenuItem(value: 'credit', child: Text('Credit / આવક')),
+                          DropdownMenuItem(value: 'debit', child: Text('Debit / જાવક')),
+                        ],
+                        onChanged: (v) => setState(() {
+                          _entryType = v!;
+                          // 5B is used only by Debit (Kharch Patrak).
+                          if (_entryType != 'debit') _entryExpShortCtrl.clear();
+                        }),
+                      ),
+                    )
+                  else
+                    SizedBox(
+                      width: 235,
+                      child: _readonlyField(
+                        '4. Entry Mode',
+                        '⚡ જમા + ઉધાર એકસાથે (Both)',
+                      ),
                     ),
-                  ),
+                  if (isCombinedMode) ...[
+                    SizedBox(
+                      width: 340,
+                      child: _labeledInput(
+                        '5A. જમા વિગત / Credit Description *',
+                        _combinedCreditNarrCtrl,
+                        hint: 'દા.ત. ગ્રાન્ટ જમા થઈ',
+                      ),
+                    ),
+                    SizedBox(
+                      width: 190,
+                      child: _labeledInput(
+                        'જમા કોની પાસેથી (Credit Party)',
+                        _combinedCreditPartyCtrl,
+                        hint: 'SSA',
+                      ),
+                    ),
+                  ],
                   SizedBox(
                     width: 480,
                     child: _labeledInput(
-                      '5. Description / વિગત (Cashbook / Bill Register) *',
+                      isCombinedMode
+                          ? '5B. ઉધાર વિગત / Debit Description (Cashbook / Bill Register) *'
+                          : '5. Description / વિગત (Cashbook / Bill Register) *',
                       _entryNarrCtrl,
-                      hint: _entryType == 'credit'
+                      hint: (!isCombinedMode && _entryType == 'credit')
                           ? 'દા.ત. ગ્રાન્ટ જમા થઈ / બેન્કનું વ્યાજ જમા થયું / પદર તરીકે આચાર્યશ્રીએ નાણા રોક્યા'
                           : 'દા.ત. SHREE ENTERPRISE નું બીલ ચૂકવ્યું / સ્ટેશનરી ખર્ચ પેટે ચૂકવ્યા',
                     ),
@@ -10341,10 +11035,12 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                   SizedBox(
                     width: 265,
                     child: DropdownButtonFormField<String>(
-                      value: _entryMedium,
+                      value: effectiveModeOptions.contains(_entryMedium)
+                          ? _entryMedium
+                          : effectiveModeOptions.first,
                       isExpanded: true,
                       decoration: const InputDecoration(labelText: 'Cash / Bank / Mode', border: OutlineInputBorder(), isDense: true),
-                      items: modeOptions.map((x) {
+                      items: effectiveModeOptions.map((x) {
                         final label = x == 'SNA SPARSH'
                             ? 'SNA SPARSH (60% : 40%)'
                             : (x == 'PFMS' ? 'PFMS (100%)' : (x == 'Bank' ? 'Bank / Cheque (100%)' : 'Cash / રોકડ (100%)'));
@@ -10358,7 +11054,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
               ),
 
               // SNA SPARSH Automatic Credit 60:40 Box (Editable by Admin + Auto-Syncs Bill/Voucher to Debit)
-              if (!isDebit && isSNAMode) ...[
+              if ((!isDebit || isCombinedMode) && isSNAMode) ...[
                 const SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.all(14),
@@ -10539,8 +11235,12 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                   _htmlBtn(
                     isEntryRestricted
                         ? (isHeadLimitMissing ? '🔒 Save Entry (Set Head Limit First)' : '🔒 Save Entry (Set Opening Balance First)')
-                        : 'Save Entry',
-                    isEntryRestricted ? const Color(0xFFC92A2A) : const Color(0xFF185D98),
+                        : (isCombinedMode
+                            ? '⚡ Save Credit + Debit Together (જમા + ઉધાર એકસાથે સેવ કરો)'
+                            : 'Save Entry'),
+                    isEntryRestricted
+                        ? const Color(0xFFC92A2A)
+                        : (isCombinedMode ? const Color(0xFF087F5B) : const Color(0xFF185D98)),
                     Colors.white,
                     () {
                       if (isHeadLimitMissing) {
@@ -10561,6 +11261,143 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                         _openQuickBankOpeningDialog(acc);
                         return;
                       }
+
+                      final fullAmt = double.tryParse(_entryAmtCtrl.text.trim()) ?? 0.0;
+
+                      // Combined Same-Date Credit + Debit Mode (Strictly for PFMS & SNA SPARSH accounts)
+                      if (isCombinedMode) {
+                        final debitParty = _entryPartyCtrl.text.trim();
+                        final debitNarr = _entryNarrCtrl.text.trim().isNotEmpty
+                            ? _entryNarrCtrl.text.trim()
+                            : (debitParty.isNotEmpty
+                                ? '$debitParty ને ${_entrySelectedHead ?? ""} ના નાણાં ચુકવ્યા'
+                                : '');
+                        if (debitNarr.isEmpty) {
+                          setState(() {
+                            _entryNoticeMsg = 'ઉધાર વિગત (Debit Description) અથવા પાર્ટીનું નામ (Party Name) દાખલ કરો.';
+                            _entryNoticeOk = false;
+                          });
+                          return;
+                        }
+                        if (isSNAMode) {
+                          if (_sna60ClaimCtrl.text.trim().isEmpty ||
+                              _sna60DateCtrl.text.trim().isEmpty ||
+                              _sna40ClaimCtrl.text.trim().isEmpty ||
+                              _sna40DateCtrl.text.trim().isEmpty) {
+                            setState(() {
+                              _entryNoticeMsg =
+                                  'SNA SPARSH માટે 60% અને 40% બંનેના Claim Number અને Settlement Date ફરજિયાત છે.';
+                              _entryNoticeOk = false;
+                            });
+                            return;
+                          }
+                        } else {
+                          if (_entryTxnCtrl.text.trim().isEmpty ||
+                              _entryClearDateCtrl.text.trim().isEmpty) {
+                            setState(() {
+                              _entryNoticeMsg =
+                                  'PFMS ઉધાર માટે PPA / Claim Number અને Settlement Date ફરજિયાત છે.';
+                              _entryNoticeOk = false;
+                            });
+                            return;
+                          }
+                        }
+
+                        final prevSnapshotCount = engine.entries.length;
+                        final crNarr = _combinedCreditNarrCtrl.text.trim().isNotEmpty
+                            ? _combinedCreditNarrCtrl.text.trim()
+                            : 'ગ્રાન્ટ જમા થઈ';
+                        final crParty = _combinedCreditPartyCtrl.text.trim().isNotEmpty
+                            ? _combinedCreditPartyCtrl.text.trim()
+                            : 'SSA';
+
+                        // 1. Add Credit Entry on the Transaction Date
+                        final crErr = engine.addTransactionV06(
+                          account: acc,
+                          head: _entrySelectedHead ?? '',
+                          date: _entryDateCtrl.text,
+                          type: 'credit',
+                          rawNarration: crNarr,
+                          expenseShort: '',
+                          amount: fullAmt,
+                          medium: _entryMedium,
+                          party: crParty,
+                          custom60Amount: double.tryParse(_snaCredit60AmtCtrl.text.trim()),
+                          custom40Amount: double.tryParse(_snaCredit40AmtCtrl.text.trim()),
+                          custom60Suffix: _snaCredit60SuffixCtrl.text,
+                          custom40Suffix: _snaCredit40SuffixCtrl.text,
+                          editAllowed: _entryEditAllowed,
+                          deadStock: false,
+                        );
+                        if (crErr != null) {
+                          setState(() {
+                            _entryNoticeMsg = 'જમા (Credit) એન્ટ્રીમાં ભૂલ: $crErr';
+                            _entryNoticeOk = false;
+                          });
+                          return;
+                        }
+
+                        // 2. Add Debit Entry on the exact same Transaction Date with its Settlement Date(s)
+                        final drErr = engine.addTransactionV06(
+                          account: acc,
+                          head: _entrySelectedHead ?? '',
+                          date: _entryDateCtrl.text,
+                          type: 'debit',
+                          rawNarration: debitNarr,
+                          expenseShort: _entryExpShortCtrl.text,
+                          amount: fullAmt,
+                          medium: _entryMedium,
+                          party: debitParty,
+                          manualVoucher: _entryManualVoucherCtrl.text,
+                          txn: _entryTxnCtrl.text,
+                          clearDate: _entryClearDateCtrl.text,
+                          sna60Claim: _sna60ClaimCtrl.text,
+                          sna60Date: _sna60DateCtrl.text,
+                          sna40Claim: _sna40ClaimCtrl.text,
+                          sna40Date: _sna40DateCtrl.text,
+                          custom60Amount: double.tryParse(_snaDebit60AmtCtrl.text.trim()),
+                          custom40Amount: double.tryParse(_snaDebit40AmtCtrl.text.trim()),
+                          custom60Suffix: _snaDebit60SuffixCtrl.text,
+                          custom40Suffix: _snaDebit40SuffixCtrl.text,
+                          editAllowed: _entryEditAllowed,
+                          deadStock: _entryDeadStock,
+                        );
+                        if (drErr != null) {
+                          // Roll back the Credit entry added in step 1 so nothing partial remains
+                          if (engine.entries.length > prevSnapshotCount) {
+                            engine.entries.removeRange(prevSnapshotCount, engine.entries.length);
+                            engine.renumberVouchers();
+                            engine.triggerUpdate();
+                          }
+                          setState(() {
+                            _entryNoticeMsg = 'ઉધાર (Debit) એન્ટ્રીમાં ભૂલ: $drErr';
+                            _entryNoticeOk = false;
+                          });
+                          return;
+                        }
+
+                        setState(() {
+                          _entryDeadStock = false;
+                          _entryNoticeMsg = isSNAMode
+                              ? '✅ જમા (60% + 40%) અને ઉધાર (60% + 40%) — કુલ 4 એન્ટ્રી એક જ ક્લિકમાં સેવ થઈ ગઈ!'
+                              : '✅ જમા (100%) અને ઉધાર (100%) — બંને એન્ટ્રી એક જ ક્લિકમાં સેવ થઈ ગઈ!';
+                          _entryNoticeOk = true;
+                          _entryAmtCtrl.clear();
+                          _entryNarrCtrl.clear();
+                          _entryExpShortCtrl.clear();
+                          _entryPartyCtrl.clear();
+                          _entryTxnCtrl.clear();
+                          _sna60ClaimCtrl.clear();
+                          _sna40ClaimCtrl.clear();
+                          _snaCredit60AmtCtrl.text = '0.00';
+                          _snaCredit40AmtCtrl.text = '0.00';
+                          _snaDebit60AmtCtrl.text = '0.00';
+                          _snaDebit40AmtCtrl.text = '0.00';
+                          _entryManualVoucherCtrl.clear();
+                        });
+                        return;
+                      }
+
                     final err = engine.addTransactionV06(
                       account: acc,
                       head: _entrySelectedHead ?? '',
@@ -10568,7 +11405,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                       type: _entryType,
                       rawNarration: _entryNarrCtrl.text,
                       expenseShort: isDebit ? _entryExpShortCtrl.text : '',
-                      amount: double.tryParse(_entryAmtCtrl.text.trim()) ?? 0.0,
+                      amount: fullAmt,
                       medium: _entryMedium,
                       party: _entryPartyCtrl.text,
                       manualVoucher: _entryManualVoucherCtrl.text,
@@ -10651,12 +11488,55 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
   // PANEL 10: CASHBOOK (`#cashbook` — EXACT A4 ODD/EVEN PAGES + DATE-WISE TABLE)
   // --------------------------------------------------------------------------
 
+  static const List<double> _kCashbookGapDropdownOptions = <double>[
+    -1.0,
+    0.0,
+    2.0,
+    4.0,
+    6.0,
+    8.0,
+    10.0,
+    12.0,
+    15.0,
+    18.0,
+    20.0,
+    25.0,
+    30.0,
+    35.0,
+    40.0,
+    45.0,
+    50.0,
+    55.0,
+    60.0,
+  ];
+
+  static String _gapDropdownLabel(double g) {
+    if (g < 0) return '✨ Auto Full Page Cover (આખું પેજ ભરાય તે રીતે)';
+    if (g == 0) return '0 mm (No Extra Gap)';
+    if (g == 50) return '50 mm (Full Page Cover for 5 Entries)';
+    return '${g.toStringAsFixed(0)} mm Gap';
+  }
+
+  static double _nearestGapOption(double raw) {
+    if (raw < 0) return -1.0;
+    double best = 4.0;
+    double bestDiff = 999.0;
+    for (final opt in _kCashbookGapDropdownOptions) {
+      if (opt < 0) continue;
+      final d = (opt - raw).abs();
+      if (d < bestDiff) {
+        bestDiff = d;
+        best = opt;
+      }
+    }
+    return best;
+  }
+
   Future<void> _openQuickPageWiseEntryDialog(String acc, CashbookPagePair pair) async {
     final creditPageNo = pair.creditPageNo;
     final debitPageNo = pair.debitPageNo;
     String currentVal = engine.getCreditPageEntryCount(acc, creditPageNo, pair.pairKey)?.toString() ?? 'auto';
-    double currentGapMm = engine.getCreditPageEntryGapMm(acc, creditPageNo, pair.pairKey);
-    final gapCtrl = TextEditingController(text: currentGapMm.toStringAsFixed(1));
+    double currentGapMm = _nearestGapOption(engine.getCreditPageEntryGapMm(acc, creditPageNo, pair.pairKey));
 
     final datesInPair = <String>{
       ...pair.credits.map((e) => fmtDateDDMMYY(e.date)),
@@ -10677,11 +11557,11 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
             style: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w800, color: Color(0xFF11345F)),
           ),
           content: SizedBox(
-            width: 580,
+            width: 540,
             child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Container(
                     padding: const EdgeInsets.all(10),
@@ -10693,82 +11573,50 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                     child: Text(
                       'Credit Page $creditPageNo (આવક) → Automatically sets Debit Page $debitPageNo (જાવક)\n'
                       'Dates on this page pair: $dateRangeText\n'
-                      'Currently showing: ${pair.alignedCredits.length} Aligned Opposite Rows (${pair.credits.length} Cr / ${pair.debits.length} Dr) • Gap: ${currentGapMm.toStringAsFixed(1)}mm\n'
-                      '• Only set Credit Page $creditPageNo here — opposite Debit Page $debitPageNo is automatically aligned row-by-row with the exact same entry count and gap!',
+                      'Currently showing: ${pair.alignedCredits.length} Aligned Opposite Rows (${pair.credits.length} Cr / ${pair.debits.length} Dr)\n'
+                      '• Only set Credit Page $creditPageNo here — opposite Debit Page $debitPageNo is automatically aligned row-by-row with full-page coverage!',
                       style: const TextStyle(fontSize: 12.2, fontWeight: FontWeight.w700, color: Color(0xFF1E293B), height: 1.38),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  Text(
-                    '1. Number of Entries on Credit Page $creditPageNo (Auto-sets Debit Page $debitPageNo):',
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Color(0xFF0E3360)),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      ChoiceChip(
-                        label: const Text('✨ Auto (Fit Full Last Entry by Font Size)'),
-                        selected: currentVal == 'auto',
-                        onSelected: (_) => setModalState(() => currentVal = 'auto'),
-                      ),
-                      for (final n in const <int>[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15])
-                        ChoiceChip(
-                          label: Text('$n Entries (Page $creditPageNo → P.$debitPageNo)'),
-                          selected: currentVal == '$n',
-                          onSelected: (_) => setModalState(() => currentVal = '$n'),
-                        ),
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    value: <String>['auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '20', '25'].contains(currentVal)
+                        ? currentVal
+                        : 'auto',
+                    decoration: InputDecoration(
+                      labelText: '1. Number of Entries on Credit Page $creditPageNo (→ Auto Debit Page $debitPageNo)',
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: [
+                      const DropdownMenuItem(value: 'auto', child: Text('✨ Auto (Fit Full Last Entry by Font Size)')),
+                      for (final n in const <int>[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20])
+                        DropdownMenuItem(value: '$n', child: Text('$n Entries per Page (Page $creditPageNo → P.$debitPageNo)')),
+                      const DropdownMenuItem(value: '25', child: Text('All Fit (Up to 25 Entries)')),
                     ],
+                    onChanged: (v) {
+                      if (v != null) setModalState(() => currentVal = v);
+                    },
                   ),
-                  const Divider(height: 22),
-                  Text(
-                    '2. Gap Between Two Entries on Page $creditPageNo & Page $debitPageNo (બે એન્ટ્રી વચ્ચે જગ્યા - mm):',
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Color(0xFF0E3360)),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      SizedBox(
-                        width: 180,
-                        child: _labeledInput(
-                          'Entry Gap (mm)',
-                          gapCtrl,
-                          isNumber: true,
-                          onChanged: (v) {
-                            final d = double.tryParse(v.trim());
-                            if (d != null) {
-                              setModalState(() => currentGapMm = d.clamp(0.0, 35.0));
-                            }
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      const Expanded(
-                        child: Text(
-                          'Sets exact vertical spacing (mm) between consecutive entries on both Credit & Debit sides.',
-                          style: TextStyle(fontSize: 12, color: Color(0xFF475569), fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      for (final g in const <double>[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 25])
-                        ChoiceChip(
-                          label: Text('${g.toStringAsFixed(0)} mm'),
-                          selected: (currentGapMm - g).abs() < 0.2,
-                          onSelected: (_) {
-                            setModalState(() {
-                              currentGapMm = g;
-                              gapCtrl.text = g.toStringAsFixed(1);
-                            });
-                          },
-                        ),
-                    ],
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<double>(
+                    isExpanded: true,
+                    value: currentGapMm,
+                    decoration: InputDecoration(
+                      labelText: '2. Gap Between Two Entries on Page $creditPageNo & Page $debitPageNo (mm)',
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: _kCashbookGapDropdownOptions
+                        .map((g) => DropdownMenuItem<double>(
+                              value: g,
+                              child: Text(_gapDropdownLabel(g)),
+                            ))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) setModalState(() => currentGapMm = v);
+                    },
                   ),
                 ],
               ),
@@ -10782,7 +11630,6 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
             FilledButton(
               style: FilledButton.styleFrom(backgroundColor: const Color(0xFF087F5B)),
               onPressed: () {
-                final parsedGap = (double.tryParse(gapCtrl.text.trim()) ?? currentGapMm).clamp(0.0, 35.0);
                 if (currentVal == 'auto') {
                   engine.setCreditPageEntryCount(acc, creditPageNo, null, pair.pairKey);
                 } else {
@@ -10791,12 +11638,12 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                     engine.setCreditPageEntryCount(acc, creditPageNo, parsed, pair.pairKey);
                   }
                 }
-                engine.setCreditPageEntryGapMm(acc, creditPageNo, parsedGap, pair.pairKey);
+                engine.setCreditPageEntryGapMm(acc, creditPageNo, currentGapMm, pair.pairKey);
                 engine.triggerUpdate();
                 if (mounted) setState(() {});
                 Navigator.of(ctx).pop();
                 _showToast(
-                  'Credit Page $creditPageNo (→ Auto Debit Page $debitPageNo) set to ${currentVal == "auto" ? "Auto" : "$currentVal Entries"} with ${parsedGap.toStringAsFixed(1)}mm Gap.',
+                  'Credit Page $creditPageNo (→ Auto Debit Page $debitPageNo) set to ${currentVal == "auto" ? "Auto" : "$currentVal Entries"} with ${_gapDropdownLabel(currentGapMm)}.',
                 );
               },
               child: const Text('✔ Apply to Credit Page & Auto-Set Debit Page'),
@@ -10808,7 +11655,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
   }
 
   /// Opens a single Table Dialog where Admin can configure Credit Pages (Page 1, Page 3, Page 5, Page 7...)
-  /// with their Page-Wise Number of Entries and Gap Between Two Entries, automatically setting Debit Pages (Page 2, Page 4, Page 6, Page 8...).
+  /// with Dropdowns for Page-Wise Number of Entries and Gap Between Two Entries, automatically setting Debit Pages (Page 2, Page 4, Page 6, Page 8...).
   Future<void> _openAllCreditPagesSetupTableDialog(String acc) async {
     await showDialog<void>(
       context: context,
@@ -10821,7 +11668,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF11345F)),
             ),
             content: SizedBox(
-              width: 720,
+              width: 740,
               child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -10835,8 +11682,8 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                         border: Border.all(color: const Color(0xFF90B4E2)),
                       ),
                       child: const Text(
-                        '• માત્ર જમા બાજુના પેજ (Page 1, Page 3, Page 5, Page 7...) માં એન્ટ્રી સંખ્યા અને બે એન્ટ્રી વચ્ચેની જગ્યા (Gap) સેટ કરો — સામેનું ઉધાર પેજ (Page 2, Page 4, Page 6, Page 8...) ઓટોમેટિક સેટ થશે!\n'
-                        '• જો એક જ તારીખમાં ૧ જમા સામે ૨ કે વધુ ઉધાર એન્ટ્રી હશે (દા.ત. Page 1-2), તો જમા અને ઉધાર સામસામે (Exact Opposite) જ ગોઠવાશે.',
+                        '• માત્ર જમા બાજુના પેજ (Page 1, Page 3, Page 5, Page 7...) માં ડ્રોપડાઉનથી એન્ટ્રી સંખ્યા અને બે એન્ટ્રી વચ્ચેની જગ્યા (0mm થી 60mm અથવા Auto Full Page) સેટ કરો — સામેનું ઉધાર પેજ (Page 2, Page 4, Page 6...) ઓટોમેટિક સેટ થશે!\n'
+                        '• જો 5 એન્ટ્રી અને 50mm ગેપ (અથવા 10 એન્ટ્રી) સેટ કરશો તો આખું પેજ (Full Page) પ્રોફેશનલ રીતે કવર થશે.',
                         style: TextStyle(fontSize: 12.2, fontWeight: FontWeight.w700, color: Color(0xFF1E293B), height: 1.38),
                       ),
                     ),
@@ -10851,7 +11698,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                         final cPage = p.creditPageNo;
                         final dPage = p.debitPageNo;
                         final curCount = engine.getCreditPageEntryCount(acc, cPage, p.pairKey)?.toString() ?? 'auto';
-                        final curGap = engine.getCreditPageEntryGapMm(acc, cPage, p.pairKey);
+                        final curGap = _nearestGapOption(engine.getCreditPageEntryGapMm(acc, cPage, p.pairKey));
                         return Container(
                           margin: const EdgeInsets.only(bottom: 8),
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -10886,7 +11733,9 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                                 width: 210,
                                 child: DropdownButtonFormField<String>(
                                   isExpanded: true,
-                                  value: curCount,
+                                  value: <String>['auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '20', '25'].contains(curCount)
+                                      ? curCount
+                                      : 'auto',
                                   decoration: InputDecoration(
                                     labelText: 'Page $cPage Entries (→ P.$dPage)',
                                     border: const OutlineInputBorder(),
@@ -10894,8 +11743,9 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                                   ),
                                   items: [
                                     const DropdownMenuItem(value: 'auto', child: Text('✨ Auto (By Font Size)')),
-                                    for (final n in const <int>[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15])
-                                      DropdownMenuItem(value: '$n', child: Text('$n Entries with Gap')),
+                                    for (final n in const <int>[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20])
+                                      DropdownMenuItem(value: '$n', child: Text('$n Entries per Page')),
+                                    const DropdownMenuItem(value: '25', child: Text('All Fit (25 Entries)')),
                                   ],
                                   onChanged: (v) {
                                     if (v == null) return;
@@ -10911,19 +11761,20 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                                 ),
                               ),
                               SizedBox(
-                                width: 190,
+                                width: 225,
                                 child: DropdownButtonFormField<double>(
                                   isExpanded: true,
-                                  value: const <double>[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 25].contains(curGap.roundToDouble())
-                                      ? curGap.roundToDouble()
-                                      : 4.0,
+                                  value: curGap,
                                   decoration: InputDecoration(
                                     labelText: 'Page $cPage Gap (બે એન્ટ્રી વચ્ચે જગ્યા)',
                                     border: const OutlineInputBorder(),
                                     isDense: true,
                                   ),
-                                  items: const <double>[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 25]
-                                      .map((g) => DropdownMenuItem(value: g, child: Text('Gap: ${g.toStringAsFixed(0)} mm')))
+                                  items: _kCashbookGapDropdownOptions
+                                      .map((g) => DropdownMenuItem<double>(
+                                            value: g,
+                                            child: Text(_gapDropdownLabel(g), overflow: TextOverflow.ellipsis),
+                                          ))
                                       .toList(),
                                   onChanged: (v) {
                                     if (v == null) return;
@@ -10965,16 +11816,158 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
     );
   }
 
+  /// Unified, easy-to-use Dropdown Bar for managing:
+  /// 1. Date Mode (Multi-Date in Same Page vs Single Date per Page)
+  /// 2. Page Selection (All Pages OR Credit Page 1, 3, 5... -> Auto Debit Page 2, 4, 6...)
+  /// 3. Entries per Page (Auto, 1 to 15, 20, All 25)
+  /// 4. Gap Between Two Entries (Auto Full Page Cover, 0 mm to 60 mm including 50 mm)
+  /// 5. Font Size (pt)
   Widget _buildMultiDateSamePageOptionBar(String acc) {
     final m = engine.getAccountMeta(acc);
     final currPages = engine.buildCashbookPages(acc);
-    final activeFontPt = engine.globalFontPt ?? engine.cashbookPrintFontPt;
-    final activeGapMm = engine.cashbookEntryGapMm;
+
+    // Validate selectedSetupPageKey against available Credit Pages
+    final validPageKeys = <String>{
+      'ALL',
+      for (final p in currPages) '${p.creditPageNo}',
+    };
+    final selectedPageKey = validPageKeys.contains(engine.selectedSetupPageKey)
+        ? engine.selectedSetupPageKey
+        : 'ALL';
+
+    CashbookPagePair? selectedPair;
+    if (selectedPageKey != 'ALL') {
+      final wantedCPage = int.tryParse(selectedPageKey);
+      for (final p in currPages) {
+        if (p.creditPageNo == wantedCPage) {
+          selectedPair = p;
+          break;
+        }
+      }
+    }
+
     final hasAnyPageWiseOverride = engine.pageEntryCountMap.keys.any((k) => k.startsWith('$acc|')) ||
         engine.pageEntryGapMap.keys.any((k) => k.startsWith('$acc|'));
 
+    // Determine active Entries dropdown value for the selected target ('ALL' or specific Credit Page)
+    const entryDropdownItems = <String>[
+      'auto',
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+      '9',
+      '10',
+      '11',
+      '12',
+      '13',
+      '14',
+      '15',
+      '20',
+      '25',
+    ];
+    String activeEntriesValue;
+    if (selectedPair != null) {
+      final pageCnt = engine.getCreditPageEntryCount(
+        acc,
+        selectedPair.creditPageNo,
+        selectedPair.pairKey,
+      );
+      activeEntriesValue = pageCnt == null ? 'auto' : '$pageCnt';
+    } else {
+      activeEntriesValue = engine.defaultMaxEntriesPerPage == 12
+          ? 'auto'
+          : '${engine.defaultMaxEntriesPerPage}';
+    }
+    if (!entryDropdownItems.contains(activeEntriesValue)) {
+      activeEntriesValue = 'auto';
+    }
+
+    // Determine active Gap dropdown value for the selected target ('ALL' or specific Credit Page)
+    final double rawActiveGap = selectedPair != null
+        ? engine.getCreditPageEntryGapMm(
+            acc,
+            selectedPair.creditPageNo,
+            selectedPair.pairKey,
+          )
+        : engine.cashbookEntryGapMm;
+    final double activeGapValue = _nearestGapOption(rawActiveGap);
+
+    // Determine active Font Size dropdown value
+    const fontDropdownItems = <double>[
+      7.0,
+      7.5,
+      8.0,
+      8.5,
+      9.0,
+      9.5,
+      10.0,
+      10.5,
+      11.0,
+      11.5,
+      12.0,
+    ];
+    final double rawFontPt = selectedPair != null
+        ? (engine.pageFontMap['page|$acc|${selectedPair.creditPageNo}'] ??
+            engine.pageFontMap[selectedPair.pairKey] ??
+            engine.globalFontPt ??
+            engine.cashbookPrintFontPt)
+        : (engine.globalFontPt ?? engine.cashbookPrintFontPt);
+    double activeFontValue = 10.0;
+    double bestFontDiff = 999.0;
+    for (final fOpt in fontDropdownItems) {
+      final d = (fOpt - rawFontPt).abs();
+      if (d < bestFontDiff) {
+        bestFontDiff = d;
+        activeFontValue = fOpt;
+      }
+    }
+
+    // Build summary badges of any per-page overrides
+    final overrideBadges = <Widget>[];
+    for (final p in currPages) {
+      final cPage = p.creditPageNo;
+      final dPage = p.debitPageNo;
+      final cnt = engine.getCreditPageEntryCount(acc, cPage, p.pairKey);
+      final hasCustomGap =
+          engine.pageEntryGapMap.containsKey('$acc|creditPage|$cPage') ||
+              engine.pageEntryGapMap.containsKey(p.pairKey);
+      final gapVal = engine.getCreditPageEntryGapMm(acc, cPage, p.pairKey);
+      if (cnt != null || hasCustomGap) {
+        overrideBadges.add(
+          InputChip(
+            backgroundColor: const Color(0xFFFFFBEB),
+            side: const BorderSide(color: Color(0xFFF59E0B)),
+            label: Text(
+              'Page $cPage→$dPage: ${cnt != null ? "$cnt Entries" : "Auto"} • ${gapVal < 0 ? "Full Page" : "Gap ${gapVal.toStringAsFixed(0)}mm"}',
+              style: const TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF92400E),
+              ),
+            ),
+            onPressed: () {
+              setState(() {
+                engine.selectedSetupPageKey = '$cPage';
+              });
+            },
+            onDeleted: () {
+              engine.setCreditPageEntryCount(acc, cPage, null, p.pairKey);
+              engine.setCreditPageEntryGapMm(acc, cPage, null, p.pairKey);
+              engine.triggerUpdate();
+              setState(() {});
+            },
+          ),
+        );
+      }
+    }
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: const Color(0xFFF0F6FF),
         border: Border.all(color: const Color(0xFF90B4E2), width: 1.4),
@@ -10983,316 +11976,314 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: 10,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
+          Row(
             children: [
-              Text(
-                '📅 કેશબુક પેજમાં તારીખ સેટિંગ ($acc • ${m.type} — બધા ખાતા માટે):',
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF0E3360),
-                ),
-              ),
-              _htmlBtn(
-                !engine.cashbookContinuousDates
-                    ? '☑ દરેક તારીખ નવા પેજ પર (Single Date per Page) ✓'
-                    : '☐ દરેક તારીખ નવા પેજ પર (Single Date per Page)',
-                !engine.cashbookContinuousDates
-                    ? const Color(0xFF185D98)
-                    : const Color(0xFFE8F0FA),
-                !engine.cashbookContinuousDates
-                    ? Colors.white
-                    : const Color(0xFF164B80),
-                () {
-                  engine.cashbookContinuousDates = false;
-                  engine.triggerUpdate();
-                  setState(() {});
-                },
-              ),
-              _htmlBtn(
-                engine.cashbookContinuousDates
-                    ? '☑ એક પેજમાં અનેક તારીખ — સળંગ એન્ટ્રી (Multi-Date Entries in Same Page) ✓'
-                    : '☐ એક પેજમાં અનેક તારીખ — સળંગ એન્ટ્રી (Multi-Date Entries in Same Page)',
-                engine.cashbookContinuousDates
-                    ? const Color(0xFF087F5B)
-                    : const Color(0xFFE8F0FA),
-                engine.cashbookContinuousDates
-                    ? Colors.white
-                    : const Color(0xFF164B80),
-                () {
-                  engine.cashbookContinuousDates = true;
-                  if (engine.defaultMaxEntriesPerPage < 6) {
-                    engine.defaultMaxEntriesPerPage = 12;
-                  }
-                  engine.triggerUpdate();
-                  setState(() {});
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // 1. Entries per Page (Auto, 2 to 15, and All Fit)
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              const Text(
-                '📄 એક પેજમાં એન્ટ્રી સંખ્યા (Entries per Page — 2 to 15 & All):',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF1E293B),
-                ),
-              ),
-              _htmlBtn(
-                engine.defaultMaxEntriesPerPage == 12 && !hasAnyPageWiseOverride
-                    ? '☑ ✨ Auto (By Font Size) ✓'
-                    : '✨ Auto (By Font Size)',
-                engine.defaultMaxEntriesPerPage == 12 && !hasAnyPageWiseOverride
-                    ? const Color(0xFF087F5B)
-                    : Colors.white,
-                engine.defaultMaxEntriesPerPage == 12 && !hasAnyPageWiseOverride
-                    ? Colors.white
-                    : const Color(0xFF065F46),
-                () {
-                  engine.defaultMaxEntriesPerPage = 12;
-                  engine.pageEntryCountMap.removeWhere((k, _) => k.startsWith('$acc|'));
-                  engine.triggerUpdate();
-                  setState(() {});
-                },
-              ),
-              for (final capOpt in const <int>[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 25])
-                _htmlBtn(
-                  engine.defaultMaxEntriesPerPage == capOpt && !hasAnyPageWiseOverride
-                      ? (capOpt == 25 ? '☑ All Fit (25) ✓' : '☑ $capOpt Entries ✓')
-                      : (capOpt == 25 ? 'All Fit (25)' : '$capOpt Entries'),
-                  engine.defaultMaxEntriesPerPage == capOpt && !hasAnyPageWiseOverride
-                      ? const Color(0xFF0B4F9C)
-                      : Colors.white,
-                  engine.defaultMaxEntriesPerPage == capOpt && !hasAnyPageWiseOverride
-                      ? Colors.white
-                      : const Color(0xFF164B80),
-                  () {
-                    engine.defaultMaxEntriesPerPage = capOpt;
-                    engine.pageEntryCountMap.removeWhere((k, _) => k.startsWith('$acc|'));
-                    engine.triggerUpdate();
-                    setState(() {});
-                  },
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // 2. Gap Between Two Entries (mm)
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              const Text(
-                '📏 બે એન્ટ્રી વચ્ચે જગ્યા (Gap Between Two Entries):',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF0E3360),
-                ),
-              ),
-              for (final g in const <double>[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 18, 20, 25])
-                _htmlBtn(
-                  (activeGapMm - g).abs() < 0.2 ? '☑ Gap ${g.toStringAsFixed(0)}mm ✓' : '${g.toStringAsFixed(0)}mm',
-                  (activeGapMm - g).abs() < 0.2
-                      ? const Color(0xFF087F5B)
-                      : Colors.white,
-                  (activeGapMm - g).abs() < 0.2
-                      ? Colors.white
-                      : const Color(0xFF164B80),
-                  () {
-                    engine.cashbookEntryGapMm = g;
-                    engine.pageEntryGapMap.removeWhere((k, _) => k.startsWith('$acc|'));
-                    engine.triggerUpdate();
-                    setState(() {});
-                  },
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // 3. Auto Font Size (pt)
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              const Text(
-                '🔤 Auto Font Size (પૂરી છેલ્લી એન્ટ્રી સમાવી ઓટો નવા પેજ):',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF0E3360),
-                ),
-              ),
-              for (final pt in const <double>[8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0])
-                _htmlBtn(
-                  (activeFontPt - pt).abs() < 0.05 ? '☑ ${pt}pt ✓' : '${pt}pt',
-                  (activeFontPt - pt).abs() < 0.05
-                      ? const Color(0xFF0B4F9C)
-                      : Colors.white,
-                  (activeFontPt - pt).abs() < 0.05
-                      ? Colors.white
-                      : const Color(0xFF164B80),
-                  () {
-                    engine.cashbookPrintFontPt = pt;
-                    engine.globalFontPt = pt;
-                    engine.pageFontMap['default'] = pt;
-                    engine.pageFontMap.removeWhere((k, _) => k.contains(acc));
-                    engine.triggerUpdate();
-                    setState(() {});
-                  },
-                ),
-            ],
-          ),
-          // 4. Inline Page-by-Page (Credit Page 1, Page 3, Page 5... -> Auto Debit Page 2, Page 4, Page 6...) Entries & Gap Controls
-          if (currPages.isNotEmpty) ...[
-            const Divider(height: 18),
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                const Text(
-                  '📑 Page-Wise Entries & Gap (માત્ર જમા બાજુ Page 1, Page 3, Page 5... સેટ કરો → સામેનું ઉધાર પેજ Page 2, Page 4, Page 6... ઓટોમેટિક સેટ થશે):',
-                  style: TextStyle(
-                    fontSize: 12.5,
+              const Icon(Icons.tune_rounded, size: 18, color: Color(0xFF0E3360)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'કેશબુક પેજ, એન્ટ્રી સંખ્યા અને ગેપ સેટિંગ ($acc • ${m.type}) — બધા વિકલ્પો સરળ ડ્રોપડાઉનમાં:',
+                  style: const TextStyle(
+                    fontSize: 13,
                     fontWeight: FontWeight.w900,
                     color: Color(0xFF0E3360),
                   ),
                 ),
-                _htmlBtn(
-                  '📋 Open All Pages Table Setup',
-                  const Color(0xFF185D98),
-                  Colors.white,
-                  () => _openAllCreditPagesSetupTableDialog(acc),
-                ),
-                if (hasAnyPageWiseOverride)
-                  _htmlBtn(
-                    '↺ Reset All Pages to Auto',
-                    const Color(0xFFFFE3E3),
-                    const Color(0xFFC92A2A),
-                    () {
-                      engine.pageEntryCountMap.removeWhere((k, _) => k.startsWith('$acc|'));
-                      engine.pageEntryGapMap.removeWhere((k, _) => k.startsWith('$acc|'));
-                      engine.triggerUpdate();
-                      setState(() {});
-                    },
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              // 1. Date Mode Dropdown
+              SizedBox(
+                width: 285,
+                child: DropdownButtonFormField<bool>(
+                  isExpanded: true,
+                  value: engine.cashbookContinuousDates,
+                  decoration: const InputDecoration(
+                    labelText: '1. પેજમાં તારીખ મોડ (Date Mode)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 9),
                   ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              runSpacing: 8,
-              children: currPages.map((p) {
-                final cPage = p.creditPageNo;
-                final dPage = p.debitPageNo;
-                final curCount = engine.getCreditPageEntryCount(acc, cPage, p.pairKey)?.toString() ?? 'auto';
-                final curGap = engine.getCreditPageEntryGapMm(acc, cPage, p.pairKey);
-                const gapOpts = <double>[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 18, 20, 25];
-                final matchedGap = gapOpts.contains(curGap.roundToDouble()) ? curGap.roundToDouble() : 4.0;
-
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: curCount != 'auto' ? const Color(0xFFFFFBEB) : Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: curCount != 'auto' ? const Color(0xFFF59E0B) : const Color(0xFF93C5FD),
-                      width: 1.3,
+                  items: const [
+                    DropdownMenuItem<bool>(
+                      value: true,
+                      child: Text(
+                        '☑ એક પેજમાં અનેક તારીખ (Multi-Date)',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+                      ),
                     ),
+                    DropdownMenuItem<bool>(
+                      value: false,
+                      child: Text(
+                        '☐ દરેક તારીખ નવા પેજ પર (Single Date)',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v == null) return;
+                    engine.cashbookContinuousDates = v;
+                    if (v && engine.defaultMaxEntriesPerPage < 2) {
+                      engine.defaultMaxEntriesPerPage = 12;
+                    }
+                    engine.triggerUpdate();
+                    setState(() {});
+                  },
+                ),
+              ),
+
+              // 2. Select Page Dropdown (All Pages OR Credit Page 1, 3, 5... -> Auto Debit Page 2, 4, 6...)
+              SizedBox(
+                width: 280,
+                child: DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  value: selectedPageKey,
+                  decoration: const InputDecoration(
+                    labelText: '2. પેજ પસંદ કરો (Credit Page → Auto Debit)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 9),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      InkWell(
-                        onTap: () => _openQuickPageWiseEntryDialog(acc, p),
+                  items: [
+                    const DropdownMenuItem<String>(
+                      value: 'ALL',
+                      child: Text(
+                        '🌐 બધા પેજ એકસાથે (All Pages)',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: Color(0xFF0E3360)),
+                      ),
+                    ),
+                    for (final p in currPages)
+                      DropdownMenuItem<String>(
+                        value: '${p.creditPageNo}',
                         child: Text(
-                          '📄 Page $cPage Credit (→ Auto Page $dPage Debit) • ${p.alignedCredits.length} Rows',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w900,
-                            color: Color(0xFF0F2942),
-                          ),
+                          '📄 Page ${p.creditPageNo} જમા (→ Auto P.${p.debitPageNo} ઉધાર) [${p.alignedCredits.length} Rows]',
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
                         ),
                       ),
-                      const SizedBox(height: 6),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SizedBox(
-                            width: 135,
-                            child: DropdownButtonFormField<String>(
-                              isExpanded: true,
-                              value: <String>['auto', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '25'].contains(curCount)
-                                  ? curCount
-                                  : 'auto',
-                              decoration: const InputDecoration(
-                                labelText: 'Entries',
-                                border: OutlineInputBorder(),
-                                isDense: true,
-                                contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-                              ),
-                              items: [
-                                const DropdownMenuItem(value: 'auto', child: Text('✨ Auto', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
-                                for (final n in const <int>[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
-                                  DropdownMenuItem(value: '$n', child: Text('$n Entries', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
-                                const DropdownMenuItem(value: '25', child: Text('All (25)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
-                              ],
-                              onChanged: (v) {
-                                if (v == null) return;
-                                if (v == 'auto') {
-                                  engine.setCreditPageEntryCount(acc, cPage, null, p.pairKey);
-                                } else {
-                                  engine.setCreditPageEntryCount(acc, cPage, int.tryParse(v), p.pairKey);
-                                }
-                                engine.triggerUpdate();
-                                setState(() {});
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          SizedBox(
-                            width: 115,
-                            child: DropdownButtonFormField<double>(
-                              isExpanded: true,
-                              value: matchedGap,
-                              decoration: const InputDecoration(
-                                labelText: 'Gap (mm)',
-                                border: OutlineInputBorder(),
-                                isDense: true,
-                                contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-                              ),
-                              items: gapOpts
-                                  .map((g) => DropdownMenuItem(
-                                        value: g,
-                                        child: Text('Gap ${g.toStringAsFixed(0)}mm', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
-                                      ))
-                                  .toList(),
-                              onChanged: (v) {
-                                if (v == null) return;
-                                engine.setCreditPageEntryGapMm(acc, cPage, v, p.pairKey);
-                                engine.triggerUpdate();
-                                setState(() {});
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
+                  ],
+                  onChanged: (v) {
+                    if (v == null) return;
+                    setState(() {
+                      engine.selectedSetupPageKey = v;
+                    });
+                  },
+                ),
+              ),
+
+              // 3. Entries per Page Dropdown
+              SizedBox(
+                width: 225,
+                child: DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  value: activeEntriesValue,
+                  decoration: InputDecoration(
+                    labelText: selectedPair != null
+                        ? '3. Page ${selectedPair.creditPageNo}→${selectedPair.debitPageNo} એન્ટ્રી સંખ્યા'
+                        : '3. એક પેજમાં એન્ટ્રી (Entries/Page)',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
                   ),
-                );
-              }).toList(),
+                  items: [
+                    const DropdownMenuItem<String>(
+                      value: 'auto',
+                      child: Text(
+                        '✨ Auto (By Font Size)',
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: Color(0xFF087F5B)),
+                      ),
+                    ),
+                    for (final n in const <int>[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20])
+                      DropdownMenuItem<String>(
+                        value: '$n',
+                        child: Text(
+                          '$n Entries per Page',
+                          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    const DropdownMenuItem<String>(
+                      value: '25',
+                      child: Text(
+                        'All Fit (25 Entries)',
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v == null) return;
+                    if (selectedPair != null) {
+                      if (v == 'auto') {
+                        engine.setCreditPageEntryCount(
+                          acc,
+                          selectedPair.creditPageNo,
+                          null,
+                          selectedPair.pairKey,
+                        );
+                      } else {
+                        engine.setCreditPageEntryCount(
+                          acc,
+                          selectedPair.creditPageNo,
+                          int.tryParse(v),
+                          selectedPair.pairKey,
+                        );
+                      }
+                    } else {
+                      engine.defaultMaxEntriesPerPage =
+                          v == 'auto' ? 12 : (int.tryParse(v) ?? 12);
+                      engine.pageEntryCountMap
+                          .removeWhere((k, _) => k.startsWith('$acc|'));
+                    }
+                    engine.triggerUpdate();
+                    setState(() {});
+                  },
+                ),
+              ),
+
+              // 4. Gap Between Two Entries Dropdown (Auto Full Page + 0mm to 60mm)
+              SizedBox(
+                width: 255,
+                child: DropdownButtonFormField<double>(
+                  isExpanded: true,
+                  value: activeGapValue,
+                  decoration: InputDecoration(
+                    labelText: selectedPair != null
+                        ? '4. Page ${selectedPair.creditPageNo}→${selectedPair.debitPageNo} બે એન્ટ્રી વચ્ચે જગ્યા'
+                        : '4. બે એન્ટ્રી વચ્ચે જગ્યા (Gap mm)',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  ),
+                  items: _kCashbookGapDropdownOptions
+                      .map((g) => DropdownMenuItem<double>(
+                            value: g,
+                            child: Text(
+                              _gapDropdownLabel(g),
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w800,
+                                color: g < 0 || g == 50
+                                    ? const Color(0xFF087F5B)
+                                    : const Color(0xFF10233F),
+                              ),
+                            ),
+                          ))
+                      .toList(),
+                  onChanged: (v) {
+                    if (v == null) return;
+                    if (selectedPair != null) {
+                      engine.setCreditPageEntryGapMm(
+                        acc,
+                        selectedPair.creditPageNo,
+                        v,
+                        selectedPair.pairKey,
+                      );
+                    } else {
+                      engine.cashbookEntryGapMm = v;
+                      engine.pageEntryGapMap
+                          .removeWhere((k, _) => k.startsWith('$acc|'));
+                    }
+                    engine.triggerUpdate();
+                    setState(() {});
+                  },
+                ),
+              ),
+
+              // 5. Font Size Dropdown
+              SizedBox(
+                width: 155,
+                child: DropdownButtonFormField<double>(
+                  isExpanded: true,
+                  value: activeFontValue,
+                  decoration: InputDecoration(
+                    labelText: selectedPair != null
+                        ? '5. Page ${selectedPair.creditPageNo} Font'
+                        : '5. Font Size (pt)',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  ),
+                  items: fontDropdownItems
+                      .map((pt) => DropdownMenuItem<double>(
+                            value: pt,
+                            child: Text(
+                              '${pt.toStringAsFixed(1)} pt',
+                              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+                            ),
+                          ))
+                      .toList(),
+                  onChanged: (v) {
+                    if (v == null) return;
+                    if (selectedPair != null) {
+                      engine.pageFontMap['page|$acc|${selectedPair.creditPageNo}'] = v;
+                      engine.pageFontMap['page|$acc|${selectedPair.debitPageNo}'] = v;
+                      engine.pageFontMap[selectedPair.pairKey] = v;
+                    } else {
+                      engine.cashbookPrintFontPt = v;
+                      engine.globalFontPt = v;
+                      engine.pageFontMap['default'] = v;
+                      engine.pageFontMap.removeWhere((k, _) => k.contains(acc));
+                    }
+                    engine.triggerUpdate();
+                    setState(() {});
+                  },
+                ),
+              ),
+
+              // Quick table dialog & Reset buttons
+              _htmlBtn(
+                '📋 All Pages Setup',
+                const Color(0xFF185D98),
+                Colors.white,
+                () => _openAllCreditPagesSetupTableDialog(acc),
+              ),
+              if (hasAnyPageWiseOverride)
+                _htmlBtn(
+                  '↺ Reset Pages',
+                  const Color(0xFFFFE3E3),
+                  const Color(0xFFC92A2A),
+                  () {
+                    engine.pageEntryCountMap.removeWhere((k, _) => k.startsWith('$acc|'));
+                    engine.pageEntryGapMap.removeWhere((k, _) => k.startsWith('$acc|'));
+                    engine.selectedSetupPageKey = 'ALL';
+                    engine.triggerUpdate();
+                    setState(() {});
+                  },
+                ),
+            ],
+          ),
+          if (overrideBadges.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                const Text(
+                  '📌 Page-wise Active Settings:',
+                  style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: Color(0xFF0E3360)),
+                ),
+                ...overrideBadges,
+              ],
             ),
           ],
         ],
@@ -11774,9 +12765,9 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                           final idx = entry.key;
                           final e = entry.value;
                           final slotH = idx < p.slotHeightsMm.length ? p.slotHeightsMm[idx] : p.crRowHeightMm;
-                          final gapPx = (p.entryGapMm * 3.1).clamp(2.0, 80.0);
+                          final gapPx = (p.entryGapMm * mmPx).clamp(2.0, 220.0);
                           if (e == null) {
-                            return SizedBox(height: slotH * 3.1);
+                            return SizedBox(height: slotH * mmPx);
                           }
                           final c = RojmelEngine.cashAmt(e);
                           final b = RojmelEngine.bankAmt(e);
@@ -11784,7 +12775,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                           return InkWell(
                             onTap: () => _openEditTransactionModal(e),
                             child: Container(
-                              constraints: BoxConstraints(minHeight: slotH * 3.1),
+                              constraints: BoxConstraints(minHeight: slotH * mmPx),
                               padding: EdgeInsets.only(top: 4, bottom: gapPx),
                               child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -11822,9 +12813,9 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                           final idx = entry.key;
                           final e = entry.value;
                           final slotH = idx < p.slotHeightsMm.length ? p.slotHeightsMm[idx] : p.drRowHeightMm;
-                          final gapPx = (p.entryGapMm * 3.1).clamp(2.0, 80.0);
+                          final gapPx = (p.entryGapMm * mmPx).clamp(2.0, 220.0);
                           if (e == null) {
-                            return SizedBox(height: slotH * 3.1);
+                            return SizedBox(height: slotH * mmPx);
                           }
                           final c = RojmelEngine.cashAmt(e);
                           final b = RojmelEngine.bankAmt(e);
@@ -11834,7 +12825,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                           return InkWell(
                             onTap: () => _openEditTransactionModal(e),
                             child: Container(
-                              constraints: BoxConstraints(minHeight: slotH * 3.1),
+                              constraints: BoxConstraints(minHeight: slotH * mmPx),
                               padding: EdgeInsets.only(top: 4, bottom: gapPx),
                               child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -12218,6 +13209,9 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
                     _showToast('Downloaded Complete Excel Workbook (all reports, 28 sheets) for "$acc"!');
                   }),
                   _htmlBtn('🗑 Delete All Entries of Selected Account (2x Confirm)', const Color(0xFFFFE3E3), const Color(0xFFC92A2A), () => _openDeleteAllAccountEntriesModal(acc)),
+                _htmlBtn('\u{1F527} \u0AB5\u0ABE\u0A89\u0A9A\u0AB0 \u0AB0\u0ABF\u0AAA\u0AC7\u0AB0 \u0A85\u0AA8\u0AC7 \u0AB8\u0AC7\u0AB5 (Repair Vouchers)', const Color(0xFFE8F0FA), const Color(0xFF164B80), () => _repairVouchersAndSaveCloud(acc)),
+                _htmlBtn('\u{1F512} FY \u0AAB\u0ACD\u0AB0\u0AC0\u0A9D \u0A85\u0AA8\u0AC7 \u0AA8\u0AB5\u0AC1\u0A82 \u0AB5\u0AB0\u0ACD\u0AB7 (Freeze FY)', const Color(0xFFD3F9D8), const Color(0xFF087F5B), () => _openFreezeAuditedFyModal(acc)),
+                _htmlBtn('\u{1F4E6} \u0AAB\u0ACD\u0AB0\u0AC0\u0A9D \u0AA5\u0AAF\u0AC7\u0AB2\u0ABE FY \u0A9C\u0AC1\u0A93 (Frozen Archives)', const Color(0xFFF3E8FF), const Color(0xFF5B21B6), () => _openFrozenFyArchivesModal()),
                 ],
               ),
               if (engine.activeReportType == 'daybook') ...[
@@ -12301,20 +13295,31 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
         return _reportExtraAuditTable(type, list, acc, mAcc);
       case 'audit_pack':
       default:
+        final cbPages = engine.buildCashbookPages(acc, engine.reportFilterHead, engine.reportFromDate, engine.reportToDate);
+        final cbLead = engine.printSetup.cashbookLeadBlank;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _report16CoverPageAndIndex(list, acc, mAcc),
-            _report8Parishisht10UC(list, acc, mAcc),
-            _report7Parishisht9Reconciliation(list, acc, mAcc),
-            _report9Parishisht11GrantReg(acc, mAcc),
-            _report6Parishisht8(acc, mAcc),
+            ...cbPages.asMap().entries.expand((en) => <Widget>[
+                  _buildExactHtmlCashbookSinglePage(en.value, isCredit: true, physicalPage: cbLead + en.key * 2 + 1),
+                  _buildExactHtmlCashbookSinglePage(en.value, isCredit: false, physicalPage: cbLead + en.key * 2 + 2),
+                ]),
+            _report2Parishisht2Khatavahi(list, acc, mAcc, pageMap, khMap),
             _report3BillRegister(list, acc, mAcc, pageMap),
             _report4ChequeClaimRegister(list, acc, mAcc, pageMap),
             _report5KharchPatrak(list, acc, mAcc, pageMap),
+            _report6Parishisht8(acc, mAcc),
+            _report7Parishisht9Reconciliation(list, acc, mAcc),
+            _report8Parishisht10UC(list, acc, mAcc),
+            _report9Parishisht11GrantReg(acc, mAcc),
+            _report10Annexure12(allAcc, acc, mAcc),
+            _report11MonthlyHisab(allAcc, acc, mAcc),
             _report11BMonthlyLimitAndBalance(allAcc, acc, mAcc),
+            _report12Passbook(list, acc, mAcc),
             _report13TallyAudit(list, acc, mAcc),
             _report14TarijPatrak(list, acc, mAcc),
+            _report15CertifiedVouchers(list, acc, mAcc, pageMap, khMap),
             for (final k in const [
               'cash_register', 'interest_register', 'party_register', 'balance_sheet',
               'income_expenditure', 'gfr_12a', 'monthly_brs', 'asset_register',
@@ -13966,7 +14971,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
   // REPORT 6: Parishisht-8 (પરિશિષ્ટ-૮ ગોષવારો)
   Widget _report6Parishisht8(String acc, AccountMeta mAcc) {
     final showLim = mAcc.isSnaOrPfms;
-    final headRows = engine.computeHeadWiseSummary(acc, engine.reportFromDate, engine.reportToDate);
+    final headRows = _filteredHeadRows(acc);
     double sumLim = 0, sumOpen = 0, sumCr60 = 0, sumCr40 = 0, sumCr = 0, sumAvail = 0, sumDrCash = 0, sumDrBank = 0, sumDr = 0, sumClose = 0;
 
     final rows = headRows.asMap().entries.map((entry) {
@@ -14045,7 +15050,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
 
   // REPORT 7: Parishisht-9 (બેંક સાથે મેળવણું – રીકન્સીલેશન)
   Widget _report7Parishisht9Reconciliation(List<RojmelEntry> list, String acc, AccountMeta mAcc) {
-    final openBank = engine.getAccountOpening(acc).bank;
+    final openBank = _openingAtReportFromDate(acc).bank;
     double crBank = 0, drBank = 0;
     for (final e in list) {
       if (e.type == 'credit') {
@@ -14256,7 +15261,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
 
   // REPORT 8: Parishisht-10 (પરિશિષ્ટ – ૧૦ : ગ્રાન્ટ વપરાશ પ્રમાણપત્ર — Exact Excel Layout `image_22d7c3.png` + Fully Editable & Mergeable Cells `image_22c4e4.png` + Font & Row Height Controls)
   Widget _report8Parishisht10UC(List<RojmelEntry> list, String acc, AccountMeta mAcc) {
-    final headRows = engine.computeHeadWiseSummary(acc, engine.reportFromDate, engine.reportToDate);
+    final headRows = _filteredHeadRows(acc);
     double sumOpenCash = 0, sumOpenBank = 0, sumBankRec = 0, sumBankTot = 0, sumBankExp = 0, sumPadarCr = 0, sumPadarDr = 0, sumCloseCash = 0, sumCloseBank = 0, sumCloseTot = 0;
     double chequeReturnAmt = 0;
 
@@ -14553,7 +15558,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
   // REPORT 9: Parishisht-11 Grant Register (ગ્રાન્ટ રજીસ્ટર : પરિશિષ્ટ ૧૧)
   Widget _report9Parishisht11GrantReg(String acc, AccountMeta mAcc) {
     final showLim = mAcc.isSnaOrPfms;
-    final headRows = engine.computeHeadWiseSummary(acc, engine.reportFromDate, engine.reportToDate);
+    final headRows = _filteredHeadRows(acc);
     double totLim = 0, totRec = 0, totExp = 0, totBal = 0;
 
     final rows = headRows.asMap().entries.map((entry) {
@@ -14618,7 +15623,9 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
     final targetMonths = engine.selectedAnnex12Month == 'ALL'
         ? months
         : months.where((m) => m['ym'] == engine.selectedAnnex12Month).toList();
-    final headsList = engine.getAccountSpecificHeads(acc);
+    final headsList = engine.reportFilterHead == 'ALL'
+        ? engine.getAccountSpecificHeads(acc)
+        : <String>[engine.reportFilterHead];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -15444,7 +16451,7 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
 
   // REPORT 16: Cover Page (`પુઠું`) & Audit Certificates
   Widget _report16CoverPageAndIndex(List<RojmelEntry> list, String acc, AccountMeta mAcc) {
-    final accOp = engine.getAccountOpening(acc);
+    final accOp = _openingAtReportFromDate(acc);
     double crCash = 0, crBank = 0, drCash = 0, drBank = 0;
     for (final e in list) {
       if (e.type == 'credit') {
@@ -15883,6 +16890,95 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
   final _bulkPasteCtrl = TextEditingController();
 
   bool _excelImportBusy = false;
+  bool _grantHeadExcelBusy = false;
+
+  Future<void> _downloadGrantHeadsExcelTemplate(String acc) async {
+    try {
+      final m = engine.getAccountMeta(acc);
+      final bytes = RojmelExcelIO.buildGrantHeadsTemplate(engine, acc);
+      final safe = acc.replaceAll(RegExp(r'[^A-Za-z0-9\u0A80-\u0AFF]+'), '_');
+      final kind = m.isSnaOrPfms ? 'ANNUAL_LIMIT' : 'OPENING_BALANCE';
+      await PsmFileExportHelper.saveOrShare(
+        bytes: bytes,
+        filename: 'ROJMEL_GRANT_HEADS_TEMPLATE_${safe}_${kind}_${engine.financialYear}.xlsx',
+        title: 'Rojmel Grant Heads Excel Template ($acc)',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      _showToast(
+        'ગ્રાન્ટ હેડ ટેમ્પ્લેટ ડાઉનલોડ થયું ("$acc" — શીટ 1: ગ્રાન્ટ હેડ અપલોડ, શીટ 2: સૂચના).',
+      );
+    } catch (e) {
+      _showToast('ગ્રાન્ટ હેડ ટેમ્પ્લેટ બનાવવામાં ભૂલ: $e');
+    }
+  }
+
+  Future<void> _uploadGrantHeadsExcel(String acc) async {
+    if (_grantHeadExcelBusy) return;
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['xlsx'],
+      withData: true,
+    );
+    final bytes = picked?.files.single.bytes;
+    if (bytes == null) return;
+    setState(() => _grantHeadExcelBusy = true);
+    try {
+      final m = engine.getAccountMeta(acc);
+      final parsed = RojmelExcelIO.parseGrantHeadsUpload(bytes, m);
+      final errors = <String>[...parsed.errors];
+      // Allow uploading into the currently selected account even if the template was downloaded under another account name
+      if (errors.isNotEmpty) {
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text('ગ્રાન્ટ હેડ Excel માં ${errors.length} ભૂલ — કોઈ હેડ ઉમેરાયો નથી'),
+            content: SizedBox(
+              width: 620,
+              height: 340,
+              child: ListView(
+                children: [
+                  for (final e in errors.take(100))
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text('• $e', style: const TextStyle(fontSize: 14)),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('બરાબર, સુધારું છું'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
+      final count = RojmelExcelIO.applyGrantHeadsRows(engine, acc, parsed.rows);
+      // If this account is currently loaded into the Account Edit form, sync draft state too
+      if (_accEditOldName == acc || _accNameCtrl.text.trim() == acc) {
+        final updatedMeta = engine.getAccountMeta(acc);
+        _draftAccountHeads = List<String>.from(engine.getAccountSpecificHeads(acc));
+        _draftHeadOpenings = updatedMeta.headOpenings.map((k, v) => MapEntry(k, v.copy()));
+        _draftHeadLimits = Map<String, double>.from(updatedMeta.headLimits);
+        _accOpenBankCtrl.text = updatedMeta.openingBank.toStringAsFixed(2);
+        _accOpenCashCtrl.text = updatedMeta.openingCash.toStringAsFixed(2);
+      }
+      setState(() {});
+      _showToast(
+        m.isSnaOrPfms
+            ? '✅ $count ગ્રાન્ટ હેડ વાર્ષિક લિમિટ સાથે "$acc" ખાતામાં સફળતાપૂર્વક અપલોડ થયા! હવે "💾 SAVE" દબાવો.'
+            : '✅ $count ગ્રાન્ટ હેડ ઉઘડતી સિલક સાથે "$acc" ખાતામાં સફળતાપૂર્વક અપલોડ થયા! હવે "💾 SAVE" દબાવો.',
+      );
+    } catch (e) {
+      _showToast('ગ્રાન્ટ હેડ Excel વાંચવામાં ભૂલ: $e');
+    } finally {
+      if (mounted) setState(() => _grantHeadExcelBusy = false);
+    }
+  }
 
   Future<void> _downloadRojmelExcelTemplate(String acc) async {
     try {
@@ -16028,8 +17124,10 @@ class _SupabaseRojmelScreenState extends State<SupabaseRojmelScreen> {
             ready && missingLimit.isEmpty,
             heads.isEmpty
                 ? Wrap(spacing: 8, runSpacing: 8, children: [
-                    const Text('આ ખાતામાં હજુ કોઈ ગ્રાન્ટ હેડ નથી. પહેલાં Grant Heads / Rojmel Accounts માં હેડ ઉમેરો.',
+                    const Text('આ ખાતામાં હજુ કોઈ ગ્રાન્ટ હેડ નથી. નીચેથી ગ્રાન્ટ હેડ ટેમ્પ્લેટ ડાઉનલોડ કરી Excel થી એકસાથે ગ્રાન્ટ હેડ ઉમેરો અથવા Grant Heads પેનલમાં જાઓ:',
                         style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF9A3412))),
+                    _htmlBtn('📥 ગ્રાન્ટ હેડ ટેમ્પ્લેટ ડાઉનલોડ', const Color(0xFF087F5B), Colors.white, () => _downloadGrantHeadsExcelTemplate(acc)),
+                    _htmlBtn('📤 ગ્રાન્ટ હેડ Excel અપલોડ', const Color(0xFF0B4F6C), Colors.white, () => _uploadGrantHeadsExcel(acc)),
                     _htmlBtn('🗂 Grant Heads', const Color(0xFF185D98), Colors.white, () => _goToPanel('grantHeadsPanel')),
                   ])
                 : isLimitAccount

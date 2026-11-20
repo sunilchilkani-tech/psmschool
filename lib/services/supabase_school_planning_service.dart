@@ -413,9 +413,6 @@ class SupabaseSchoolPlanningService {
       final admins = allActive
           .where((r) => _text(r['role']).toLowerCase() == 'admin')
           .toList();
-      if (teachersOnly.isNotEmpty) {
-        return teachersOnly;
-      }
       return <Map<String, dynamic>>[...teachersOnly, ...admins];
     } catch (_) {
       return <Map<String, dynamic>>[];
@@ -762,9 +759,6 @@ class SupabaseSchoolPlanningService {
       } else if (schoolType == 'girls') {
         girlsCount = rawTotal > 0 ? rawTotal : rawGirls;
         boysCount = 0;
-      } else if (rawTotal > 0 && rawBoys == 0 && rawGirls == 0) {
-        boysCount = (rawTotal + 1) ~/ 2;
-        girlsCount = rawTotal - boysCount;
       }
       final totalCount = schoolType == 'boys'
           ? boysCount

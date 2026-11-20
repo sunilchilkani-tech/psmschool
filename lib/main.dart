@@ -57,16 +57,9 @@ class AttendanceApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: AppTheme.theme,
         scrollBehavior: AppScrollBehavior(),
-        // User-selected display size applies to every screen.
-        builder: (context, child) => ValueListenableBuilder<double>(
-          valueListenable: DisplayScale.notifier,
-          builder: (context, scale, _) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              textScaler: TextScaler.linear(scale),
-            ),
-            // Phones get tighter dialogs, buttons and app bars.
-            child: ResponsiveTheme(child: child ?? const SizedBox.shrink()),
-          ),
+        // User-selected Zoom In / Zoom Out & pinch-to-zoom applies to every screen.
+        builder: (context, child) => MobileZoomViewport(
+          child: ResponsiveTheme(child: child ?? const SizedBox.shrink()),
         ),
         home: const _RootGate(),
       ),
@@ -85,8 +78,10 @@ class _RootGateState extends State<_RootGate> {
   static const String _supabaseProfileCacheKey = 'psm_supabase_profile_v1';
   static const String _supabaseProfileUidCacheKey =
       'psm_supabase_profile_uid_v1';
+  static const String _lastDiseCodeCacheKey = 'psm_last_logged_in_dise_code_v1';
 
   Map<String, dynamic>? _supabaseProfile;
+  String _lastDiseCode = '';
   bool _restoringSession = true;
 
   @override
@@ -110,6 +105,7 @@ class _RootGateState extends State<_RootGate> {
       return;
     }
 
+    _lastDiseCode = (prefs.getString(_lastDiseCodeCacheKey) ?? '').trim();
     final user = client.auth.currentUser;
     final rawProfile = prefs.getString(_supabaseProfileCacheKey);
     final cachedUserId = prefs.getString(_supabaseProfileUidCacheKey);
@@ -181,9 +177,16 @@ class _RootGateState extends State<_RootGate> {
 
   Future<void> _saveSupabaseProfile(Map<String, dynamic> profile) async {
     try {
+      final dise = '${profile['school_id'] ?? ''}'.trim();
+      if (dise.isNotEmpty) {
+        _lastDiseCode = dise;
+      }
+      final prefs = await SharedPreferences.getInstance();
+      if (dise.isNotEmpty) {
+        await prefs.setString(_lastDiseCodeCacheKey, dise);
+      }
       final user = Supabase.instance.client.auth.currentUser;
       if (user == null) return;
-      final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_supabaseProfileCacheKey, jsonEncode(profile));
       await prefs.setString(_supabaseProfileUidCacheKey, user.id);
     } catch (_) {
@@ -203,11 +206,21 @@ class _RootGateState extends State<_RootGate> {
 
   Future<void> _logoutSupabase() async {
     final client = Supabase.instance.client;
+    final currentDise = '${_supabaseProfile?['school_id'] ?? ''}'.trim();
+    if (currentDise.isNotEmpty) {
+      _lastDiseCode = currentDise;
+    }
     try {
       await client.auth.signOut();
     } finally {
       try {
         final prefs = await SharedPreferences.getInstance();
+        if (currentDise.isNotEmpty) {
+          await prefs.setString(_lastDiseCodeCacheKey, currentDise);
+        } else {
+          final savedDise = (prefs.getString(_lastDiseCodeCacheKey) ?? '').trim();
+          if (savedDise.isNotEmpty) _lastDiseCode = savedDise;
+        }
         await _clearSupabaseProfileCache(prefs);
       } catch (_) {}
       if (mounted) {
@@ -250,6 +263,7 @@ class _RootGateState extends State<_RootGate> {
 
     return SupabasePlatformEntryScreen(
       onAuthenticated: _onSupabaseAuthenticated,
+      initialSchoolId: _lastDiseCode,
     );
   }
 }

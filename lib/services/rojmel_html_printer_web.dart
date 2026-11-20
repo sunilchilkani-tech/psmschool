@@ -1,46 +1,50 @@
 import 'dart:async';
 import 'dart:html' as html;
 
-/// Opens a same-origin blank window synchronously during the user's click so
-/// that popup blockers are less likely to block the print workflow.
-dynamic openRojmelPrintWindow() => html.window.open('about:blank', '_blank');
+/// Returns a lightweight token instead of opening an `about:blank` popup tab,
+/// because in compiled Flutter Web `window.open` returns `_WindowCrossFrame`
+/// (`WindowBase`), which cannot be cast to `html.Window`. Printing via a hidden
+/// same-origin `IFrameElement` avoids `about:blank` tabs and popup blockers.
+dynamic openRojmelPrintWindow() => 'iframe_print_handle';
 
-/// Loads the complete print HTML into the popup using a Blob URL.
-///
-/// Navigating the popup to a text/html Blob URL avoids the legacy
-/// Document.open/write/close APIs. The supplied HTML page is responsible for
-/// calling window.print() after the document loads.
+/// Loads the complete print HTML into a hidden iframe using a Blob URL so the
+/// document's onload/print script triggers the browser print dialog directly
+/// without opening a blank tab.
 void writeRojmelPrintDocument(dynamic windowHandle, String htmlDocument) {
-  final popupBase = windowHandle as html.WindowBase?;
-  if (popupBase == null) {
-    throw StateError('The browser blocked the print window.');
+  if (windowHandle is html.WindowBase) {
+    try {
+      windowHandle.close();
+    } catch (_) {}
   }
 
-  final popup = popupBase as html.Window?;
-  if (popup == null) {
-    throw StateError('The browser did not return a navigable print window.');
-  }
+  final existing = html.document.getElementById('psm-rojmel-print-iframe');
+  existing?.remove();
 
   final blob = html.Blob(<Object>[htmlDocument], 'text/html;charset=utf-8');
   final objectUrl = html.Url.createObjectUrlFromBlob(blob);
-  try {
-    popup.location.href = objectUrl;
-    // `Window.setTimeout` is not exposed by the Dart HTML binding used by this
-    // project. Use dart:async Timer to revoke the temporary URL after printing
-    // has had time to load the document.
-    Timer(const Duration(minutes: 2), () {
-      html.Url.revokeObjectUrl(objectUrl);
-    });
-  } catch (_) {
+
+  final iframe = html.IFrameElement()
+    ..id = 'psm-rojmel-print-iframe'
+    ..style.position = 'fixed'
+    ..style.right = '0'
+    ..style.bottom = '0'
+    ..style.width = '1px'
+    ..style.height = '1px'
+    ..style.border = '0'
+    ..style.opacity = '0'
+    ..src = objectUrl;
+
+  html.document.body?.append(iframe);
+
+  Timer(const Duration(minutes: 3), () {
     html.Url.revokeObjectUrl(objectUrl);
-    rethrow;
-  }
+  });
 }
 
 void closeRojmelPrintWindow(dynamic windowHandle) {
-  try {
-    (windowHandle as html.WindowBase?)?.close();
-  } catch (_) {
-    // Nothing further is needed if the browser already closed the window.
+  if (windowHandle is html.WindowBase) {
+    try {
+      windowHandle.close();
+    } catch (_) {}
   }
 }

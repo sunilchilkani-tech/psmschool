@@ -453,19 +453,6 @@ class SupabaseStudentService {
         roll = await _nextRollNumber(schoolRef: schoolRef, classId: classId);
       }
     }
-    final existing = await _client
-        .from('students')
-        .select('id,roll_number')
-        .eq('school_ref', schoolRef)
-        .eq('class_id', classId)
-        .eq('is_active', true);
-    final duplicate = existing.any((row) =>
-        _str(row['id']) != (studentId ?? '') &&
-        _str(row['roll_number']).toUpperCase() == roll.toUpperCase());
-    if (duplicate) {
-      throw FormatException('Roll number $roll already exists in this class.');
-    }
-
     final payload = _buildPublicPayload(
       values: <String, dynamic>{...values, 'roll_number': roll},
       schoolRef: schoolRef,
@@ -474,22 +461,35 @@ class SupabaseStudentService {
     );
     late final String savedId;
     if ((studentId ?? '').trim().isNotEmpty) {
-      final row = await _client
-          .from('students')
-          .update(payload)
-          .eq('id', studentId!.trim())
-          .eq('school_ref', schoolRef)
-          .select('id')
-          .single();
-      savedId = _str(row['id']);
+      savedId = studentId!.trim();
+      await _client.rpc(
+        'psm_update_student_profile_with_roll_shift',
+        params: <String, dynamic>{
+          'p_student_id': savedId,
+          'p_values': payload,
+          'p_custom_fields': payload['custom_fields'],
+        },
+      );
     } else {
-      payload['created_at'] = DateTime.now().toUtc().toIso8601String();
-      final row =
-          await _client.from('students').insert(payload).select('id').single();
-      savedId = _str(row['id']);
+      final created = await _client.rpc(
+        'psm_add_student_with_roll',
+        params: <String, dynamic>{
+          'p_class_id': classId,
+          'p_student': payload,
+          'p_roll_number': int.tryParse(roll),
+        },
+      );
+      if (created is Map && _str(created['id']).isNotEmpty) {
+        savedId = _str(created['id']);
+      } else {
+        payload['created_at'] = DateTime.now().toUtc().toIso8601String();
+        final row =
+            await _client.from('students').insert(payload).select('id').single();
+        savedId = _str(row['id']);
+      }
     }
 
-    if (admin) {
+    if (admin && savedId.isNotEmpty) {
       final privatePayload = _buildPrivatePayload(
         values: values,
         studentId: savedId,
@@ -506,6 +506,7 @@ class SupabaseStudentService {
     required String classId,
     required String studentId,
     String? leavingDate,
+    String exitReason = 'lc',
   }) async {
     await _client.rpc(
       'psm_archive_student_and_shift_rolls',
@@ -513,7 +514,7 @@ class SupabaseStudentService {
         'p_student_id': studentId,
         if (leavingDate != null && leavingDate.trim().isNotEmpty)
           'p_exit_date': leavingDate.trim(),
-        'p_exit_reason': 'lc',
+        'p_exit_reason': exitReason.trim().isEmpty ? 'lc' : exitReason.trim(),
       },
     );
   }

@@ -17,6 +17,8 @@ class _TarijComputedRow {
   final Map<String, int> opening;
   final Map<String, int> admissions;
   final Map<String, int> exits;
+  final Map<String, int> lcExits;
+  final Map<String, int> absenceExits;
   final Map<String, int> closing;
   final int workingDays;
   final int mdmDays;
@@ -42,6 +44,8 @@ class _TarijComputedRow {
     required this.opening,
     required this.admissions,
     required this.exits,
+    this.lcExits = const <String, int>{},
+    this.absenceExits = const <String, int>{},
     required this.closing,
     required this.workingDays,
     required this.mdmDays,
@@ -138,7 +142,7 @@ class SupabaseReportExportService {
     const categories = <String>['SC', 'ST', 'OBC', 'OTHER'];
 
     Map<String, dynamic> breakdown = rawBreakdown;
-    if (rawBreakdown.isNotEmpty) {
+    if (rawBreakdown.isNotEmpty && (schoolType == 'boys' || schoolType == 'girls')) {
       final adjusted = Map<String, dynamic>.from(rawBreakdown);
       final unspecifiedPayload = _map(adjusted['UNSPECIFIED']);
       if (unspecifiedPayload.isNotEmpty) {
@@ -169,19 +173,32 @@ class SupabaseReportExportService {
       return _int(_map(group[category])[column.metric]);
     }
 
+    final unspecCatTotal = (schoolType == 'boys' || schoolType == 'girls')
+        ? 0
+        : byGender('UNSPECIFIED', 'CATEGORY_TOTAL');
     final breakdownMetricTotal =
-        byGender('BOYS', 'CATEGORY_TOTAL') + byGender('GIRLS', 'CATEGORY_TOTAL');
+        byGender('BOYS', 'CATEGORY_TOTAL') +
+        byGender('GIRLS', 'CATEGORY_TOTAL') +
+        unspecCatTotal;
     final breakdownRegTotal = categories.fold<int>(
       0,
       (sum, cat) =>
           sum +
           _int(_map(_map(breakdown['BOYS'])[cat])['registered']) +
-          _int(_map(_map(breakdown['GIRLS'])[cat])['registered']),
+          _int(_map(_map(breakdown['GIRLS'])[cat])['registered']) +
+          ((schoolType == 'boys' || schoolType == 'girls')
+              ? 0
+              : _int(_map(_map(breakdown['UNSPECIFIED'])[cat])['registered'])),
     );
 
     if (breakdown.isNotEmpty && (breakdownMetricTotal > 0 || breakdownRegTotal > 0)) {
       if (column.gender == 'TOTAL') {
-        return byGender('BOYS', column.category) + byGender('GIRLS', column.category);
+        final unspecVal = (schoolType == 'boys' || schoolType == 'girls')
+            ? 0
+            : byGender('UNSPECIFIED', column.category);
+        return byGender('BOYS', column.category) +
+            byGender('GIRLS', column.category) +
+            unspecVal;
       }
       return byGender(column.gender, column.category);
     }
@@ -207,8 +224,10 @@ class SupabaseReportExportService {
     if (schoolType == 'girls') {
       return column.gender == 'GIRLS' ? total : 0;
     }
-    // For Boys school or Direct Entry without per-gender split, attribute to BOYS so BOYS + GIRLS == TOTAL.
-    return column.gender == 'BOYS' ? total : 0;
+    if (schoolType == 'boys') {
+      return column.gender == 'BOYS' ? total : 0;
+    }
+    return 0;
   }
 
   int _dailyDatewiseValue(
@@ -703,6 +722,7 @@ class SupabaseReportExportService {
 
   Future<Uint8List> exportClasswiseAllDataXlsx({
     required String schoolName,
+    String schoolAddress = '',
     required String fromDate,
     required String toDate,
     required List<Map<String, dynamic>> classRows,
@@ -731,7 +751,10 @@ class SupabaseReportExportService {
       workbook.copy(templateName, name);
       final sheet = workbook[name];
       classNames.add(name);
-      _setText(sheet, 0, 0, schoolName);
+      final headerName = schoolAddress.trim().isEmpty
+          ? schoolName
+          : '$schoolName, ${schoolAddress.trim()}';
+      _setText(sheet, 0, 0, headerName);
       _setText(sheet, 1, 0, 'પીએમ પોષણ અને સીએમ અલ્પાહાર યોજના — $label');
       for (var rowIndex = 5; rowIndex < 421; rowIndex++) {
         _clearCell(sheet, rowIndex, 0);
@@ -1270,6 +1293,7 @@ class SupabaseReportExportService {
 
   Future<Uint8List> exportGroupwiseXlsx({
     required String schoolName,
+    String schoolAddress = '',
     required String fromDate,
     required String toDate,
     required String group,
@@ -1281,7 +1305,10 @@ class SupabaseReportExportService {
     _keepOnly(workbook, <String>{'group wise'});
     final selected = _normaliseSelection(visibleColumnKeys, rowSets: [rows]);
     final filtered = rows.where((row) => SchoolClassOrder.matches(row, group) && _hasDay(row)).toList();
-    _setText(sheet, 0, 0, schoolName);
+    final headerName = schoolAddress.trim().isEmpty
+        ? schoolName
+        : '$schoolName, ${schoolAddress.trim()}';
+    _setText(sheet, 0, 0, headerName);
     _setText(sheet, 1, 0, 'પીએમ પોષણ અને સીએમ અલ્પાહાર યોજના — ${SchoolClassOrder.labelFor(group)}');
     _setText(sheet, 2, 0, 'સમયગાળો: ${_dateLabel(fromDate)} થી ${_dateLabel(toDate)}');
     final byDate = _aggregateByDate(filtered);
@@ -1318,6 +1345,7 @@ class SupabaseReportExportService {
 
   Future<Uint8List> exportCombineReportXlsx({
     required String schoolName,
+    String schoolAddress = '',
     required String fromDate,
     required String toDate,
     required List<Map<String, dynamic>> rows,
@@ -1327,7 +1355,10 @@ class SupabaseReportExportService {
     final sheet = workbook['COMBINE REPORT'];
     _keepOnly(workbook, <String>{'COMBINE REPORT'});
     final selected = _normaliseSelection(visibleColumnKeys, rowSets: [rows]);
-    _setText(sheet, 0, 0, schoolName);
+    final headerName = schoolAddress.trim().isEmpty
+        ? schoolName
+        : '$schoolName, ${schoolAddress.trim()}';
+    _setText(sheet, 0, 0, headerName);
     _setText(sheet, 1, 0, 'એકંદર પત્રક');
     _setText(sheet, 2, 0, 'સમયગાળો: ${_dateLabel(fromDate)} થી ${_dateLabel(toDate)}');
     for (var rowIndex = 5; rowIndex < 420; rowIndex++) {
@@ -1584,6 +1615,8 @@ class SupabaseReportExportService {
     final opening = <String, int>{};
     final admissions = <String, int>{};
     final exits = <String, int>{};
+    final lcExits = <String, int>{};
+    final absenceExits = <String, int>{};
     final closing = <String, int>{};
     final perfect100 = <String, int>{};
     final age5to6 = <String, int>{};
@@ -1598,17 +1631,23 @@ class SupabaseReportExportService {
         final op = _tarijCount(perCategory, cat, gen, 'opening_count');
         final cl = _tarijCount(perCategory, cat, gen, 'closing_count');
         var adm = _tarijCount(perCategory, cat, gen, 'admission_count');
-        var ex = _tarijCount(perCategory, cat, gen, 'exit');
+        var lcEx = _tarijCount(perCategory, cat, gen, 'lc_exit_count') +
+            _tarijCount(perCategory, cat, gen, 'other_exit_count');
+        final absEx = _tarijCount(perCategory, cat, gen, 'continuous_absence_exit_count');
+        var ex = lcEx + absEx;
         if (adm == 0 && ex == 0 && cl != op) {
           if (cl > op) {
             adm = cl - op;
           } else {
             ex = op - cl;
+            lcEx = ex;
           }
         }
         opening[key] = op;
         admissions[key] = adm;
         exits[key] = ex;
+        lcExits[key] = lcEx;
+        absenceExits[key] = absEx;
         closing[key] = cl;
         perfect100[key] = _tarijCount(perCategory, cat, gen, 'perfect_attendance_gender_count');
         age5to6[key] = _tarijCount(perCategory, cat, gen, 'age_5_6_count');
@@ -1732,6 +1771,8 @@ class SupabaseReportExportService {
       opening: opening,
       admissions: admissions,
       exits: exits,
+      lcExits: lcExits,
+      absenceExits: absenceExits,
       closing: closing,
       workingDays: workingDays,
       mdmDays: mdmDays,
@@ -1759,12 +1800,14 @@ class SupabaseReportExportService {
   /// - avgPresent = SUM of class avgPresent (=SUMIF(P_range, "<>#DIV/0!"))
   /// - avgMdm = SUM of class avgMdm (=SUMIF(T_range, "<>#DIV/0!"))
   /// - attendancePct = 100 * SUM(presentDays) / SUM(registeredDays) (=IFERROR((SUM(O_range)/SUM(N_range))*100, 0))
-  _TarijComputedRow _combineTarijRows(String label, List<_TarijComputedRow> rows) {
+  _TarijComputedRow _combineTarijRows(String label, List<_TarijComputedRow> rows, {bool useMaxDays = false}) {
     const categories = <String>['SC', 'ST', 'OBC', 'OTHER', 'TOTAL'];
     const genders = <String>['BOYS', 'GIRLS', 'TOTAL'];
     final opening = <String, int>{};
     final admissions = <String, int>{};
     final exits = <String, int>{};
+    final lcExits = <String, int>{};
+    final absenceExits = <String, int>{};
     final closing = <String, int>{};
     final perfect100 = <String, int>{};
     final age5to6 = <String, int>{};
@@ -1784,6 +1827,8 @@ class SupabaseReportExportService {
         opening[key] = rows.fold<int>(0, (s, r) => s + (r.opening[key] ?? 0));
         admissions[key] = rows.fold<int>(0, (s, r) => s + (r.admissions[key] ?? 0));
         exits[key] = rows.fold<int>(0, (s, r) => s + (r.exits[key] ?? 0));
+        lcExits[key] = rows.fold<int>(0, (s, r) => s + (r.lcExits[key] ?? 0));
+        absenceExits[key] = rows.fold<int>(0, (s, r) => s + (r.absenceExits[key] ?? 0));
         closing[key] = rows.fold<int>(0, (s, r) => s + (r.closing[key] ?? 0));
         perfect100[key] = rows.fold<int>(0, (s, r) => s + (r.perfect100[key] ?? 0));
         age5to6[key] = rows.fold<int>(0, (s, r) => s + (r.age5to6[key] ?? 0));
@@ -1799,8 +1844,12 @@ class SupabaseReportExportService {
       }
     }
 
-    final workingDays = rows.fold<int>(0, (s, r) => s + r.workingDays);
-    final mdmDays = rows.fold<int>(0, (s, r) => s + r.mdmDays);
+    final workingDays = useMaxDays
+        ? rows.fold<int>(0, (m, r) => r.workingDays > m ? r.workingDays : m)
+        : rows.fold<int>(0, (s, r) => s + r.workingDays);
+    final mdmDays = useMaxDays
+        ? rows.fold<int>(0, (m, r) => r.mdmDays > m ? r.mdmDays : m)
+        : rows.fold<int>(0, (s, r) => s + r.mdmDays);
     final tithiDays = workingDays >= mdmDays ? workingDays - mdmDays : 0;
     final individualsComplete = rows.isNotEmpty && rows.every((r) => r.individualsComplete);
     final perfectCount = rows.fold<int>(0, (s, r) => s + r.perfectAttendanceCount);
@@ -1812,6 +1861,8 @@ class SupabaseReportExportService {
       opening: opening,
       admissions: admissions,
       exits: exits,
+      lcExits: lcExits,
+      absenceExits: absenceExits,
       closing: closing,
       workingDays: workingDays,
       mdmDays: mdmDays,
@@ -1940,7 +1991,7 @@ class SupabaseReportExportService {
       'ધોરણ 8',
     ]) {
       final list = byStandard[stdKey] ?? const <_TarijComputedRow>[];
-      page2Rows.add(_combineTarijRows(stdKey, list));
+      page2Rows.add(_combineTarijRows(stdKey, list, useMaxDays: true));
     }
     if (std1to5Rows.isNotEmpty) {
       page2Rows.add(_combineTarijRows('ધોરણ એક થી ધોરણ પાંચ', std1to5Rows));
@@ -2006,6 +2057,10 @@ class SupabaseReportExportService {
         return r.admissions[gk] ?? 0;
       case 'exits':
         return r.exits[gk] ?? 0;
+      case 'lc_exits':
+        return r.lcExits[gk] ?? 0;
+      case 'absence_exits':
+        return r.absenceExits[gk] ?? 0;
       case 'closing':
         return r.closing[ck] ?? 0;
       case 'working_days':
@@ -2085,6 +2140,7 @@ class SupabaseReportExportService {
 
   Future<Uint8List> exportTarijXlsx({
     required String schoolName,
+    String schoolAddress = '',
     required String monthLabel,
     required List<Map<String, dynamic>> classRows,
     required List<Map<String, dynamic>> attendanceRows,
@@ -2114,7 +2170,10 @@ class SupabaseReportExportService {
     ];
 
     void writeTarijSheet(ec.Sheet sheet, String pageSubtitle, List<_TarijComputedRow> rows) {
-      _setText(sheet, 0, 0, schoolName);
+      final headerName = schoolAddress.trim().isEmpty
+          ? schoolName
+          : '$schoolName, ${schoolAddress.trim()}';
+      _setText(sheet, 0, 0, headerName);
       _setText(sheet, 1, 0, 'માસિક પત્રક (TARIJ) — $monthLabel ($pageSubtitle)');
       _setText(
         sheet,
@@ -2291,6 +2350,7 @@ class SupabaseReportExportService {
 
   Future<Uint8List> exportMdmEkandarXlsx({
     required String schoolName,
+    String schoolAddress = '',
     required String monthLabel,
     required List<Map<String, dynamic>> classRows,
     required List<Map<String, dynamic>> attendanceRows,
@@ -2300,7 +2360,10 @@ class SupabaseReportExportService {
     final workbook = await _loadTemplate(_monthlyTemplate);
     final sheet = workbook['MDM EKANDAR'];
     _keepOnly(workbook, <String>{'MDM EKANDAR'});
-    _setText(sheet, 0, 0, schoolName);
+    final headerName = schoolAddress.trim().isEmpty
+        ? schoolName
+        : '$schoolName, ${schoolAddress.trim()}';
+    _setText(sheet, 0, 0, headerName);
     _setText(sheet, 1, 0, monthLabel);
     _setText(sheet, 2, 0, 'શાળાનું નામ');
     _setText(sheet, 2, 1, monthLabel);
@@ -2393,9 +2456,21 @@ class SupabaseReportExportService {
         .toSet();
     var colOffset = 0;
     for (final category in categories) {
+      final catTitle = _dailyCategoryLabel(category);
+      bool wroteCatHeaderOnVisibleCol = false;
       for (final gender in genders) {
         final isEnabled = enabledPairs.contains('${category}_$gender');
-        sheet.setColumnHidden(2 + colOffset, !isEnabled);
+        final colIdx = 2 + colOffset;
+        sheet.setColumnHidden(colIdx, !isEnabled);
+        if (isEnabled) {
+          if (!wroteCatHeaderOnVisibleCol) {
+            _setText(sheet, 3, colIdx, catTitle);
+            _setText(sheet, 13, colIdx, catTitle);
+            wroteCatHeaderOnVisibleCol = true;
+          }
+          _setText(sheet, 4, colIdx, _dailyGenderLabel(gender));
+          _setText(sheet, 14, colIdx, _dailyGenderLabel(gender));
+        }
         colOffset++;
       }
     }
@@ -2786,6 +2861,7 @@ $columnGroupHtml
   Future<Uint8List> buildSummaryPdfAsync({
     required String title,
     required String schoolName,
+    String schoolAddress = '',
     required String periodLabel,
     required List<String> headers,
     required List<List<String>> rows,
@@ -2938,8 +3014,11 @@ $columnGroupHtml
       required String sectionTitle,
       required List<List<String>> sectionRows,
     }) async {
+      final fullSchoolHeader = schoolAddress.trim().isEmpty
+          ? (schoolName.trim().isEmpty ? 'School' : schoolName.trim())
+          : '${schoolName.trim().isEmpty ? 'School' : schoolName.trim()}, ${schoolAddress.trim()}';
       final schoolTitleWidget = await _rasterReportText(
-        schoolName.trim().isEmpty ? 'School' : schoolName.trim(),
+        fullSchoolHeader,
         maxWidthPt: availWidth,
         fontSizePt: 13.0,
         bold: true,

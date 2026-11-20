@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pmshri_attendance/services/firebase_backend_client.dart';
@@ -57,7 +59,7 @@ Future<void> showGlobalStudentSearchDialog(
                 child: GlobalStudentSearchCard(
                   readOnly: readOnly,
                   initiallyExpanded: true,
-                  showAllWhenEmptyQuery: true,
+                  showAllWhenEmptyQuery: false,
                   onDataChanged: onDataChanged,
                 ),
               ),
@@ -151,9 +153,14 @@ const List<Map<String, String>> _kGlobalPrivateFields = <Map<String, String>>[
 
 class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
   final SupabaseClient _client = Supabase.instance.client;
+  static const int _minSearchChars = 3;
   final TextEditingController _searchCtrl = TextEditingController();
+  Timer? _searchDebounce;
+  bool _metaLoaded = false;
+  String _loadedScopeKey = '';
 
-  bool _loading = true;
+  bool _loading = false;
+  bool _hasLoaded = false;
   bool _saving = false;
   String? _error;
 
@@ -162,25 +169,51 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
   bool _isAdmin = false;
 
   List<Map<String, dynamic>> _accessibleClasses = <Map<String, dynamic>>[];
+  Set<String> _classTeacherClassIds = <String>{};
   Map<String, String> _classLabels = <String, String>{};
   List<Map<String, dynamic>> _allScopedStudents = <Map<String, dynamic>>[];
   List<String> _customHeaders = <String>[];
 
-  String _selectedClassFilter = '__ALL__';
+  String _selectedClassFilter = '__PICK_CLASS__';
   bool _includeDeactive = false;
   bool _showListWhenEmpty = false;
-  final Set<String> _selectedStudentIds = <String>{};
+
+  /// Only School Admin and the designated Class Teacher of [classId] may
+  /// deactivate or add/edit students in [classId] (never Subject Teachers).
+  bool _canManageStudentClass(String classId) {
+    if (widget.readOnly) return false;
+    if (_isAdmin) return true;
+    final cid = classId.trim();
+    if (cid.isEmpty) return false;
+    return _classTeacherClassIds.contains(cid);
+  }
 
   @override
   void initState() {
     super.initState();
-    _showListWhenEmpty =
-        widget.showAllWhenEmptyQuery || widget.initiallyExpanded;
-    _loadData();
+    _showListWhenEmpty = widget.showAllWhenEmptyQuery;
+    if (widget.initiallyExpanded) {
+      _loadData();
+    }
+  }
+
+  void _ensureLoaded({bool forceAllSchool = false}) {
+    if (_loading) return;
+    if (forceAllSchool) {
+      if (!_hasLoaded || _loadedScopeKey != '__ALL__') {
+        _loadData(forceAllSchool: true, targetScope: '__ALL__');
+      }
+      return;
+    }
+    if (_selectedClassFilter == '__PICK_CLASS__') return;
+    if (!_hasLoaded || _loadedScopeKey != _selectedClassFilter) {
+      _loadData(targetScope: _selectedClassFilter);
+    }
   }
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -213,7 +246,11 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
         _text(s['exit_date']).isEmpty;
   }
 
-  Future<void> _loadData() async {
+  Future<void> _loadData({
+    bool forceAllSchool = false,
+    bool forceRefresh = false,
+    String? targetScope,
+  }) async {
     if (!mounted) return;
     setState(() {
       _loading = true;
@@ -228,123 +265,197 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
         });
         return;
       }
-      final ref = _text(await _client.rpc('current_school_ref'));
-      if (ref.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _loading = false;
-          _error = 'No active school linked to this account.';
-        });
-        return;
+
+      var ref = _schoolRef ?? '';
+      var isAdmin = _isAdmin;
+      var schoolType = _schoolType;
+      var accessibleClasses = _accessibleClasses;
+      var ctIdSet = _classTeacherClassIds;
+      var labels = _classLabels;
+      var headers = _customHeaders;
+      Set<String> allowedClassIdSet =
+          accessibleClasses.map((c) => _text(c['id'])).toSet();
+
+      if (!_metaLoaded || forceRefresh || ref.isEmpty) {
+        ref = _text(await _client.rpc('current_school_ref'));
+        if (ref.isEmpty) {
+          if (!mounted) return;
+          setState(() {
+            _loading = false;
+            _error = 'No active school linked to this account.';
+          });
+          return;
+        }
+
+        final metaResults = await Future.wait<dynamic>(<Future<dynamic>>[
+          _client.rpc('is_school_admin'),
+          _client.rpc('psm_attendance_class_ids'),
+          _client
+              .from('school_classes')
+              .select(
+                'id,school_ref,class_key,label,sheet_name,standard,section,report_group,sort_order,is_active,class_teacher_id',
+              )
+              .eq('school_ref', ref)
+              .eq('is_active', true)
+              .order('sort_order'),
+          _client
+              .from('schools')
+              .select('school_type')
+              .eq('id', ref)
+              .maybeSingle(),
+          _client.rpc('psm_class_teacher_class_ids'),
+        ]);
+
+        isAdmin = metaResults[0] == true;
+        final rawAllowedIds = metaResults[1];
+        final rawClasses = metaResults[2] as List;
+        final schoolRow = metaResults[3];
+        final rawClassTeacherIds = metaResults[4];
+
+        final allClasses = SchoolClassOrder.sorted(
+          rawClasses.map((r) => Map<String, dynamic>.from(r as Map)),
+        );
+        labels = <String, String>{
+          for (final c in allClasses)
+            _text(c['id']): _text(c['label']).isNotEmpty
+                ? _text(c['label'])
+                : _text(c['class_key']),
+        };
+
+        if (isAdmin || rawAllowedIds == null) {
+          accessibleClasses = allClasses;
+          allowedClassIdSet = allClasses.map((c) => _text(c['id'])).toSet();
+        } else if (rawAllowedIds is List) {
+          final set = rawAllowedIds.map((e) => _text(e)).toSet();
+          accessibleClasses =
+              allClasses.where((c) => set.contains(_text(c['id']))).toList();
+          allowedClassIdSet = set;
+        } else {
+          accessibleClasses = allClasses;
+          allowedClassIdSet = allClasses.map((c) => _text(c['id'])).toSet();
+        }
+
+        headers = <String>[];
+        try {
+          final headerRow = await _client
+              .from('school_custom_headers')
+              .select('headers')
+              .eq('school_ref', ref)
+              .maybeSingle();
+          final rawHeaders = headerRow?['headers'];
+          if (rawHeaders is List) {
+            headers = rawHeaders.map((v) => _text(v)).toList();
+          }
+        } catch (_) {}
+        if (headers.isEmpty || headers.every((v) => v.isEmpty)) {
+          headers = List<String>.generate(11, (i) => 'Custom ${i + 1}');
+        }
+
+        final regType = schoolRow is Map ? _text(schoolRow['school_type']) : '';
+        schoolType = SchoolType.coedCompat(regType);
+        ctIdSet = isAdmin
+            ? allClasses.map((c) => _text(c['id'])).toSet()
+            : (rawClassTeacherIds is List
+                ? rawClassTeacherIds
+                    .map((e) => _text(e))
+                    .where((s) => s.isNotEmpty)
+                    .toSet()
+                : <String>{});
       }
 
-      final results = await Future.wait<dynamic>(<Future<dynamic>>[
-        _client.rpc('is_school_admin'),
-        _client.rpc('psm_attendance_class_ids'),
-        _client
-            .from('school_classes')
-            .select(
-              'id,school_ref,class_key,label,sheet_name,standard,section,report_group,sort_order,is_active',
-            )
-            .eq('school_ref', ref)
-            .eq('is_active', true)
-            .order('sort_order'),
-        _client.from('students').select('*').eq('school_ref', ref),
-        _client
-            .from('schools')
-            .select('school_type')
-            .eq('id', ref)
-            .maybeSingle(),
-      ]);
-
-      final isAdmin = results[0] == true;
-      final rawAllowedIds = results[1];
-      final rawClasses = results[2] as List;
-      final rawStudents = results[3] as List;
-      final schoolRow = results[4];
-
-      final allClasses = SchoolClassOrder.sorted(
-        rawClasses.map((r) => Map<String, dynamic>.from(r as Map)),
-      );
-      final labels = <String, String>{
-        for (final c in allClasses)
-          _text(c['id']): _text(c['label']).isNotEmpty
-              ? _text(c['label'])
-              : _text(c['class_key']),
-      };
-
-      List<Map<String, dynamic>> accessibleClasses;
-      Set<String> allowedClassIdSet;
-      if (isAdmin || rawAllowedIds == null) {
-        accessibleClasses = allClasses;
-        allowedClassIdSet = allClasses.map((c) => _text(c['id'])).toSet();
-      } else if (rawAllowedIds is List) {
-        final set = rawAllowedIds.map((e) => _text(e)).toSet();
-        accessibleClasses =
-            allClasses.where((c) => set.contains(_text(c['id']))).toList();
-        allowedClassIdSet = set;
+      var effectiveScope = targetScope ?? _selectedClassFilter;
+      if (isAdmin) {
+        final isValidClass =
+            accessibleClasses.any((c) => _text(c['id']) == effectiveScope);
+        if (effectiveScope != '__PICK_CLASS__' &&
+            effectiveScope != '__ALL__' &&
+            !isValidClass) {
+          effectiveScope = '__PICK_CLASS__';
+        }
       } else {
-        accessibleClasses = allClasses;
-        allowedClassIdSet = allClasses.map((c) => _text(c['id'])).toSet();
-      }
-
-      final scopedStudents = <Map<String, dynamic>>[];
-      for (final r in rawStudents) {
-        if (r is! Map) continue;
-        final m = Map<String, dynamic>.from(r);
-        final cid = _text(m['class_id']);
-        if (!isAdmin && !allowedClassIdSet.contains(cid)) {
-          continue;
+        final isValidClass =
+            accessibleClasses.any((c) => _text(c['id']) == effectiveScope);
+        if (!isValidClass) {
+          effectiveScope = accessibleClasses.isNotEmpty
+              ? _text(accessibleClasses.first['id'])
+              : '__PICK_CLASS__';
         }
-        scopedStudents.add(m);
       }
 
-      scopedStudents.sort((a, b) {
-        final ca = labels[_text(a['class_id'])] ?? '';
-        final cb = labels[_text(b['class_id'])] ?? '';
-        final cCmp = ca.compareTo(cb);
-        if (cCmp != 0) return cCmp;
-        final ra = int.tryParse(_text(a['roll_number'])) ?? 999999;
-        final rb = int.tryParse(_text(b['roll_number'])) ?? 999999;
-        if (ra != rb) return ra.compareTo(rb);
-        return _text(a['name']).compareTo(_text(b['name']));
-      });
+      final shouldFetchStudents = effectiveScope != '__PICK_CLASS__' &&
+          (effectiveScope != '__ALL__' ||
+              forceAllSchool ||
+              forceRefresh ||
+              _showListWhenEmpty ||
+              _searchCtrl.text.trim().length >= _minSearchChars);
 
-      var headers = <String>[];
-      try {
-        final headerRow = await _client
-            .from('school_custom_headers')
-            .select('headers')
-            .eq('school_ref', ref)
-            .maybeSingle();
-        final rawHeaders = headerRow?['headers'];
-        if (rawHeaders is List) {
-          headers = rawHeaders.map((v) => _text(v)).toList();
+      var scopedStudents = _allScopedStudents;
+      var loadedKey = _loadedScopeKey;
+      var hasLoadedStudents = _hasLoaded;
+
+      if (!shouldFetchStudents) {
+        if (effectiveScope == '__PICK_CLASS__' ||
+            (effectiveScope == '__ALL__' && loadedKey != '__ALL__')) {
+          scopedStudents = <Map<String, dynamic>>[];
+          loadedKey = '';
+          hasLoadedStudents = false;
         }
-      } catch (_) {}
-      if (headers.isEmpty || headers.every((v) => v.isEmpty)) {
-        headers = List<String>.generate(11, (i) => 'Custom ${i + 1}');
-      }
+      } else if (forceRefresh ||
+          !hasLoadedStudents ||
+          loadedKey != effectiveScope) {
+        final List rawStudents;
+        if (effectiveScope == '__ALL__') {
+          rawStudents =
+              await _client.from('students').select('*').eq('school_ref', ref);
+        } else {
+          rawStudents = await _client
+              .from('students')
+              .select('*')
+              .eq('school_ref', ref)
+              .eq('class_id', effectiveScope);
+        }
 
-      final regType = schoolRow is Map ? _text(schoolRow['school_type']) : '';
+        final list = <Map<String, dynamic>>[];
+        for (final r in rawStudents) {
+          if (r is! Map) continue;
+          final m = Map<String, dynamic>.from(r);
+          final cid = _text(m['class_id']);
+          if (!isAdmin && !allowedClassIdSet.contains(cid)) {
+            continue;
+          }
+          list.add(m);
+        }
+
+        list.sort((a, b) {
+          final ca = labels[_text(a['class_id'])] ?? '';
+          final cb = labels[_text(b['class_id'])] ?? '';
+          final cCmp = ca.compareTo(cb);
+          if (cCmp != 0) return cCmp;
+          final ra = int.tryParse(_text(a['roll_number'])) ?? 999999;
+          final rb = int.tryParse(_text(b['roll_number'])) ?? 999999;
+          if (ra != rb) return ra.compareTo(rb);
+          return _text(a['name']).compareTo(_text(b['name']));
+        });
+
+        scopedStudents = list;
+        loadedKey = effectiveScope;
+        hasLoadedStudents = true;
+      }
 
       if (!mounted) return;
       setState(() {
         _schoolRef = ref;
         _isAdmin = isAdmin;
-        _schoolType = SchoolType.coedCompat(regType);
+        _schoolType = schoolType;
         _accessibleClasses = accessibleClasses;
+        _classTeacherClassIds = ctIdSet;
         _classLabels = labels;
         _allScopedStudents = scopedStudents;
         _customHeaders = headers;
-        if (_selectedClassFilter != '__ALL__' &&
-            !accessibleClasses
-                .any((c) => _text(c['id']) == _selectedClassFilter)) {
-          _selectedClassFilter = '__ALL__';
-        }
-        _selectedStudentIds.removeWhere(
-          (id) => !scopedStudents.any((s) => _text(s['id']) == id),
-        );
+        _selectedClassFilter = effectiveScope;
+        _metaLoaded = true;
+        _loadedScopeKey = loadedKey;
+        _hasLoaded = hasLoadedStudents;
         _loading = false;
       });
     } catch (error) {
@@ -357,7 +468,16 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
   }
 
   List<Map<String, dynamic>> get _filteredStudents {
-    final query = _normalizeDigitsAndLower(_searchCtrl.text.trim());
+    if (_selectedClassFilter == '__PICK_CLASS__') {
+      return const <Map<String, dynamic>>[];
+    }
+    final rawTrimmed = _searchCtrl.text.trim();
+    if (_selectedClassFilter == '__ALL__' &&
+        !_showListWhenEmpty &&
+        rawTrimmed.length < _minSearchChars) {
+      return const <Map<String, dynamic>>[];
+    }
+    final query = _normalizeDigitsAndLower(rawTrimmed);
     final tokens = query
         .split(RegExp(r'\s+'))
         .map((t) => t.trim())
@@ -404,6 +524,16 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
 
   Future<void> _openStudentEditor(Map<String, dynamic> student) async {
     if (widget.readOnly || _saving || _schoolRef == null) return;
+    if (!_canManageStudentClass(_text(student['class_id']))) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'માત્ર જે-તે વર્ગના વર્ગ શિક્ષક (Class Teacher) અથવા School Admin જ વિદ્યાર્થીની માહિતી સુધારી શકે છે.',
+          ),
+        ),
+      );
+      return;
+    }
     final schoolRef = _schoolRef!;
 
     Map<String, dynamic> privateDetails = <String, dynamic>{};
@@ -498,7 +628,7 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
       }
 
       FirestoreQueryBuilder.invalidateCache('students');
-      await _loadData();
+      await _loadData(forceRefresh: true);
       widget.onDataChanged?.call();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -595,7 +725,8 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
           ),
         ),
         actions: [
-          if (!widget.readOnly)
+          if (!widget.readOnly &&
+              _canManageStudentClass(_text(s['class_id'])))
             FilledButton.tonalIcon(
               onPressed: () {
                 Navigator.of(ctx).pop();
@@ -632,32 +763,99 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
     if (widget.readOnly || _saving) return;
     final targetId = _text(student['id']);
     if (targetId.isEmpty) return;
+    if (!_canManageStudentClass(_text(student['class_id']))) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'માત્ર જે-તે વર્ગના વર્ગ શિક્ષક (Class Teacher) અથવા School Admin જ વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરી શકે છે. વિષય શિક્ષક (Subject Teacher) Deactive કરી શકતા નથી.',
+          ),
+        ),
+      );
+      return;
+    }
 
+    var selectedDate = DateTime.now();
+    var selectedReason = 'lc';
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text(
-          'Deactivate Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો',
-        ),
-        content: Text(
-          'શું તમે "${_text(student['name'])}" (GR: ${_text(student['gr']).isEmpty ? '-' : _text(student['gr'])}) ને નિષ્ક્રિય (Deactive) કરવા માંગો છો?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel / રદ કરો'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Colors.red.shade700,
+      builder: (ctx) => StatefulBuilder(
+        builder: (dialogCtx, setDialogState) {
+          final dateIso =
+              '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
+          final dateDmy =
+              '${selectedDate.day.toString().padLeft(2, '0')}/${selectedDate.month.toString().padLeft(2, '0')}/${selectedDate.year}';
+          return AlertDialog(
+            title: const Text(
+              'Deactivate Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો',
             ),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Deactivate / નિષ્ક્રિય કરો'),
-          ),
-        ],
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'શું તમે "${_text(student['name'])}" (GR: ${_text(student['gr']).isEmpty ? '-' : _text(student['gr'])}) ને નિષ્ક્રિય (Deactive) કરવા માંગો છો?',
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: dialogCtx,
+                      initialDate: selectedDate,
+                      firstDate: DateTime(2000, 1, 1),
+                      lastDate: DateTime.now().add(const Duration(days: 365)),
+                    );
+                    if (picked != null) {
+                      setDialogState(() => selectedDate = picked);
+                    }
+                  },
+                  icon: const Icon(Icons.event_outlined),
+                  label: Text('શાળા છોડ્યાની / કમી તારીખ: $dateDmy ($dateIso)'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  initialValue: selectedReason,
+                  decoration: const InputDecoration(
+                    labelText: 'હાજરીપત્રકના મુખપૃષ્ઠ મુજબ કમી કરવાનું કારણ',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'lc',
+                      child: Text('ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'continuous_absence',
+                      child: Text('સતત ગેરહાજરીથી નામ કમી કરેલ'),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setDialogState(() => selectedReason = v);
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel / રદ કરો'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red.shade700,
+                ),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Deactivate / નિષ્ક્રિય કરો'),
+              ),
+            ],
+          );
+        },
       ),
     );
     if (confirmed != true || !mounted) return;
+    final leavingIso =
+        '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
 
     setState(() {
       _saving = true;
@@ -668,12 +866,12 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
         'psm_archive_student_and_shift_rolls',
         params: <String, dynamic>{
           'p_student_id': targetId,
-          'p_exit_reason': 'deactive',
+          'p_exit_date': leavingIso,
+          'p_exit_reason': selectedReason,
         },
       );
-      _selectedStudentIds.remove(targetId);
       FirestoreQueryBuilder.invalidateCache('students');
-      await _loadData();
+      await _loadData(forceRefresh: true);
       widget.onDataChanged?.call();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -711,7 +909,7 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
         },
       );
       FirestoreQueryBuilder.invalidateCache('students');
-      await _loadData();
+      await _loadData(forceRefresh: true);
       widget.onDataChanged?.call();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -730,131 +928,35 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
     }
   }
 
-  /// Bulk Deactivate ("Make Deactivated All"):
-  /// Deactivates either the checked students, all currently searched/filtered
-  /// active students, or all active students in the current scope.
-  Future<void> _makeDeactivatedAll() async {
-    if (widget.readOnly || _saving) return;
-
-    final filteredActive =
-        _filteredStudents.where(_isStudentActive).toList();
-    final selectedActive = filteredActive
-        .where((s) => _selectedStudentIds.contains(_text(s['id'])))
-        .toList();
-    final allScopeActive =
-        _allScopedStudents.where(_isStudentActive).toList();
-
-    final targets = selectedActive.isNotEmpty
-        ? selectedActive
-        : (filteredActive.isNotEmpty ? filteredActive : allScopeActive);
-
-    if (targets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('નિષ્ક્રિય કરવા માટે કોઈ સક્રિય (Active) વિદ્યાર્થી મળ્યા નથી.'),
-        ),
-      );
-      return;
-    }
-
-    final scopeDesc = selectedActive.isNotEmpty
-        ? 'પસંદ કરેલા ${selectedActive.length} વિદ્યાર્થીઓ (Selected Students)'
-        : (_searchCtrl.text.trim().isNotEmpty ||
-                _selectedClassFilter != '__ALL__'
-            ? 'સર્ચ/ફિલ્ટર થયેલા ${targets.length} વિદ્યાર્થીઓ (Filtered Active Students)'
-            : (_isAdmin
-                ? 'સમગ્ર શાળાના બધા ${targets.length} સક્રિય વિદ્યાર્થીઓ (Whole School Active Students)'
-                : 'તમારા ફાળવેલ વર્ગના બધા ${targets.length} સક્રિય વિદ્યાર્થીઓ (Allotted Class Active Students)'));
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.person_off_rounded, color: Colors.red.shade700),
-            const SizedBox(width: 8),
-            const Expanded(
-              child: Text(
-                'Make Deactivated All / બધા વિદ્યાર્થીઓને નિષ્ક્રિય (Deactive) કરો',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-              ),
-            ),
-          ],
-        ),
-        content: Text(
-          'શું તમે ખરેખર $scopeDesc ને એકસાથે નિષ્ક્રિય (Deactive) કરવા માંગો છો?\n\n'
-          '• કુલ ${targets.length} વિદ્યાર્થીઓ Deactive યાદીમાં જશે.\n'
-          '• તેમનો ડેટા સુરક્ષિત રહેશે અને ગમે ત્યારે પાછા Active કરી શકાશે.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel / રદ કરો'),
-          ),
-          FilledButton.icon(
-            style: FilledButton.styleFrom(
-              backgroundColor: Colors.red.shade700,
-            ),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            icon: const Icon(Icons.person_off_outlined),
-            label: Text(
-              'Yes, Make Deactivated All (${targets.length})',
-            ),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    try {
-      for (final student in targets) {
-        final sid = _text(student['id']);
-        if (sid.isEmpty) continue;
-        await _client.rpc(
-          'psm_archive_student_and_shift_rolls',
-          params: <String, dynamic>{
-            'p_student_id': sid,
-            'p_exit_reason': 'deactive',
-          },
-        );
-      }
-      _selectedStudentIds.clear();
-      FirestoreQueryBuilder.invalidateCache('students');
-      await _loadData();
-      widget.onDataChanged?.call();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'કુલ ${targets.length} વિદ્યાર્થીઓને સફળતાપૂર્વક નિષ્ક્રિય (Deactive) કરવામાં આવ્યા છે.',
-          ),
-          backgroundColor: Colors.orange.shade900,
-        ),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _error = _cleanError(error));
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    final queryNotEmpty = _searchCtrl.text.trim().isNotEmpty;
+    final queryTrimmed = _searchCtrl.text.trim();
+    final queryNotEmpty = queryTrimmed.isNotEmpty;
+    final isPickClass = _selectedClassFilter == '__PICK_CLASS__';
+    final isWholeSchool = _selectedClassFilter == '__ALL__';
+    final needsMoreCharsForGlobal =
+        isWholeSchool && !_showListWhenEmpty && queryTrimmed.length < _minSearchChars;
+    final showResultsSection = !isPickClass && !needsMoreCharsForGlobal;
     final visible = _filteredStudents;
-    final showResultsSection =
-        queryNotEmpty || _showListWhenEmpty || _selectedClassFilter != '__ALL__';
     final activeVisible = visible.where(_isStudentActive).toList();
 
     final allottedClassNames = _accessibleClasses
         .map((c) => _classLabels[_text(c['id'])] ?? _text(c['label']))
         .where((s) => s.isNotEmpty)
         .join(', ');
+
+    final validDropdownValues = <String>{
+      if (_isAdmin || _accessibleClasses.isEmpty) '__PICK_CLASS__',
+      ..._accessibleClasses.map((c) => _text(c['id'])),
+      if (_isAdmin) '__ALL__',
+    };
+    final safeDropdownValue = validDropdownValues.contains(_selectedClassFilter)
+        ? _selectedClassFilter
+        : (_isAdmin
+            ? '__PICK_CLASS__'
+            : (_accessibleClasses.isNotEmpty
+                ? _text(_accessibleClasses.first['id'])
+                : '__PICK_CLASS__'));
 
     return Card(
       elevation: 2,
@@ -896,7 +998,7 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                         children: [
                           Text(
                             _isAdmin
-                                ? 'Global Student Search — સમગ્ર શાળા (All Classes • Whole School)'
+                                ? 'Global Student Search — ધોરણવાર / સમગ્ર શાળા'
                                 : 'Global Student Search — ફાળવેલ વર્ગ (Allotted Class)',
                             style: const TextStyle(
                               fontSize: 15,
@@ -907,7 +1009,7 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                           const SizedBox(height: 2),
                           Text(
                             _isAdmin
-                                ? 'Admin: વર્ગ પસંદ કર્યા વિના સમગ્ર શાળામાંથી નામ, GR નંબર, મોબાઈલ, પિતાનું નામ કે માતાના નામથી શોધો, સુધારો કરો અથવા બધાને Deactive કરો'
+                                ? 'Admin: પહેલા ધોરણ પસંદ કરો (અથવા છેલ્લે "સમગ્ર શાળા" પસંદ કરીને 3+ અક્ષર લખો) — નામ, GR, મોબાઈલ, પિતા કે માતાના નામથી શોધો અને સુધારો કરો'
                                 : 'Teacher (${allottedClassNames.isEmpty ? "No Class" : allottedClassNames}): તમારા ફાળવેલ વર્ગમાંથી નામ, GR, મોબાઈલ, પિતા કે માતાના નામથી શોધો અને સુધારો કરો',
                             style: const TextStyle(
                               fontSize: 12,
@@ -936,7 +1038,11 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                         border: Border.all(color: const Color(0xFFA7F3D0)),
                       ),
                       child: Text(
-                        'Active: $_activeCountInScope  •  Deactive: $_deactiveCountInScope',
+                        _hasLoaded
+                            ? 'Active: $_activeCountInScope  •  Deactive: $_deactiveCountInScope'
+                            : (isWholeSchool
+                                ? 'સમગ્ર શાળા: 3+ અક્ષર લખો'
+                                : 'ધોરણ પસંદ કરો'),
                         style: const TextStyle(
                           fontSize: 11.5,
                           fontWeight: FontWeight.w800,
@@ -944,42 +1050,20 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                         ),
                       ),
                     ),
-                    if (!widget.readOnly && _activeCountInScope > 0)
-                      FilledButton.tonalIcon(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFFFEE2E2),
-                          foregroundColor: const Color(0xFFB91C1C),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        onPressed: _saving ? null : _makeDeactivatedAll,
-                        icon: const Icon(Icons.person_off_outlined, size: 17),
-                        label: Text(
-                          _selectedStudentIds.isNotEmpty
-                              ? 'Make Deactivated Selected (${_selectedStudentIds.length})'
-                              : (queryNotEmpty ||
-                                      _selectedClassFilter != '__ALL__'
-                                  ? 'Make Deactivated All (${activeVisible.length})'
-                                  : 'Make Deactivated All ($_activeCountInScope)'),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
+
                     if (_schoolRef != null)
                       OutlinedButton.icon(
                         style: OutlinedButton.styleFrom(
                           visualDensity: VisualDensity.compact,
                         ),
                         onPressed: () async {
+                          final isAllOrPick = isWholeSchool || isPickClass;
                           await Navigator.of(context).push(
                             MaterialPageRoute<void>(
                               builder: (_) => ArchivedStudentsScreen(
                                 schoolRef: _schoolRef!,
-                                classId: _selectedClassFilter == '__ALL__'
-                                    ? ''
-                                    : _selectedClassFilter,
-                                classLabel: _selectedClassFilter == '__ALL__'
+                                classId: isAllOrPick ? '' : _selectedClassFilter,
+                                classLabel: isAllOrPick
                                     ? 'સમગ્ર શાળા (All Classes)'
                                     : (_classLabels[_selectedClassFilter] ??
                                         'Class'),
@@ -987,7 +1071,7 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                               ),
                             ),
                           );
-                          if (mounted) await _loadData();
+                          if (mounted) await _loadData(forceRefresh: true);
                           widget.onDataChanged?.call();
                         },
                         icon: const Icon(Icons.archive_outlined, size: 17),
@@ -996,7 +1080,9 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                     IconButton(
                       tooltip: 'Refresh Student Data',
                       visualDensity: VisualDensity.compact,
-                      onPressed: _loading ? null : _loadData,
+                      onPressed: _loading
+                          ? null
+                          : () => _loadData(forceRefresh: true),
                       icon: const Icon(Icons.refresh, size: 20),
                     ),
                   ],
@@ -1010,14 +1096,35 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                   flex: 4,
                   child: TextField(
                     controller: _searchCtrl,
-                    onChanged: (_) => setState(() {}),
+                    onChanged: (value) {
+                      setState(() {});
+                      if (_selectedClassFilter == '__ALL__' &&
+                          (!_hasLoaded || _loadedScopeKey != '__ALL__') &&
+                          !_loading) {
+                        _searchDebounce?.cancel();
+                        if (value.trim().length >= _minSearchChars) {
+                          _searchDebounce = Timer(
+                            const Duration(milliseconds: 350),
+                            () => _ensureLoaded(forceAllSchool: true),
+                          );
+                        }
+                      }
+                    },
+                    onSubmitted: (_) {
+                      if (_selectedClassFilter == '__ALL__' &&
+                          _searchCtrl.text.trim().length >= _minSearchChars) {
+                        _ensureLoaded(forceAllSchool: true);
+                      } else if (_selectedClassFilter != '__PICK_CLASS__') {
+                        _ensureLoaded();
+                      }
+                    },
                     decoration: InputDecoration(
                       prefixIcon: const Icon(
                         Icons.search_rounded,
                         color: Color(0xFF1D4ED8),
                       ),
                       hintText: _isAdmin
-                          ? 'નામ (Name), GR નંબર, મોબાઈલ નંબર, પિતાનું નામ (Father Name), કે માતાનું નામ (Mother Name) લખો...'
+                          ? 'નામ (Name), GR નંબર, મોબાઈલ, પિતા કે માતાનું નામ લખો (સમગ્ર શાળા માટે 3+ અક્ષર)...'
                           : 'નામ, GR નંબર, મોબાઈલ નંબર, પિતાનું નામ, કે માતાનું નામ લખો...',
                       filled: true,
                       fillColor: const Color(0xFFF8FAFC),
@@ -1041,39 +1148,47 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                                 setState(() {});
                               },
                             ),
-                          TextButton.icon(
-                            onPressed: () => setState(
-                              () => _showListWhenEmpty = !_showListWhenEmpty,
-                            ),
-                            icon: Icon(
-                              _showListWhenEmpty
-                                  ? Icons.expand_less
-                                  : Icons.expand_more,
-                              size: 18,
-                            ),
-                            label: Text(
-                              _showListWhenEmpty ? 'Hide List' : 'Show All',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
+                          if (!isPickClass)
+                            TextButton.icon(
+                              onPressed: () {
+                                setState(
+                                  () => _showListWhenEmpty = !_showListWhenEmpty,
+                                );
+                                if (_showListWhenEmpty) {
+                                  _ensureLoaded(
+                                    forceAllSchool: isWholeSchool,
+                                  );
+                                }
+                              },
+                              icon: Icon(
+                                _showListWhenEmpty
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                                size: 18,
+                              ),
+                              label: Text(
+                                _showListWhenEmpty ? 'Hide List' : 'Show All',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
-                          ),
                         ],
                       ),
                     ),
                   ),
                 ),
-                if (_accessibleClasses.length > 1) ...[
+                if (_isAdmin || _accessibleClasses.length > 1) ...[
                   const SizedBox(width: 10),
                   Expanded(
                     flex: 2,
                     child: DropdownButtonFormField<String>(
                       isExpanded: true,
-                      value: _selectedClassFilter,
+                      value: safeDropdownValue,
                       decoration: InputDecoration(
                         labelText: _isAdmin
-                            ? 'Scope (Default: સમગ્ર શાળા)'
+                            ? 'ધોરણ / Scope'
                             : 'ફાળવેલ વર્ગ (Allotted Class)',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -1085,15 +1200,14 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                         ),
                       ),
                       items: <DropdownMenuItem<String>>[
-                        DropdownMenuItem<String>(
-                          value: '__ALL__',
-                          child: Text(
-                            _isAdmin
-                                ? 'સમગ્ર શાળા (All Classes)'
-                                : 'બધા ફાળવેલ વર્ગો (All Allotted)',
-                            style: const TextStyle(fontWeight: FontWeight.w800),
+                        if (_isAdmin || _accessibleClasses.isEmpty)
+                          const DropdownMenuItem<String>(
+                            value: '__PICK_CLASS__',
+                            child: Text(
+                              'ધોરણ પસંદ કરો (Select Class)',
+                              style: TextStyle(fontWeight: FontWeight.w800),
+                            ),
                           ),
-                        ),
                         ..._accessibleClasses.map(
                           (c) => DropdownMenuItem<String>(
                             value: _text(c['id']),
@@ -1102,10 +1216,30 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                             ),
                           ),
                         ),
+                        if (_isAdmin)
+                          const DropdownMenuItem<String>(
+                            value: '__ALL__',
+                            child: Text(
+                              'સમગ્ર શાળા (All Classes)',
+                              style: TextStyle(fontWeight: FontWeight.w800),
+                            ),
+                          ),
                       ],
                       onChanged: (v) {
-                        if (v == null) return;
-                        setState(() => _selectedClassFilter = v);
+                        if (v == null || v == _selectedClassFilter) return;
+                        setState(() {
+                          _selectedClassFilter = v;
+                          _showListWhenEmpty = false;
+                        });
+                        if (v == '__PICK_CLASS__') {
+                          setState(() {
+                            _allScopedStudents = <Map<String, dynamic>>[];
+                            _loadedScopeKey = '';
+                            _hasLoaded = false;
+                          });
+                        } else {
+                          _loadData(targetScope: v);
+                        }
                       },
                     ),
                   ),
@@ -1132,6 +1266,27 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
             if (_loading) ...[
               const SizedBox(height: 12),
               const LinearProgressIndicator(),
+            ] else if (!showResultsSection) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFC),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFE2E8F0)),
+                ),
+                child: Text(
+                  isPickClass
+                      ? '👆 વિદ્યાર્થી જોવા કે શોધવા માટે ઉપરથી ધોરણ પસંદ કરો (અથવા છેલ્લે "સમગ્ર શાળા (All Classes)" પસંદ કરીને ઓછામાં ઓછા 3 અક્ષર લખો).'
+                      : '🔎 સમગ્ર શાળામાં શોધવા માટે ઓછામાં ઓછા 3 અક્ષર લખો (અથવા "Show All" દબાવો).',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF475569),
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
             ] else if (showResultsSection) ...[
               const SizedBox(height: 10),
               Wrap(
@@ -1140,41 +1295,13 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                 spacing: 8,
                 runSpacing: 6,
                 children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Checkbox(
-                        value: activeVisible.isNotEmpty &&
-                            activeVisible.every(
-                              (s) =>
-                                  _selectedStudentIds.contains(_text(s['id'])),
-                            ),
-                        onChanged: activeVisible.isEmpty
-                            ? null
-                            : (checked) {
-                                setState(() {
-                                  if (checked == true) {
-                                    for (final s in activeVisible) {
-                                      _selectedStudentIds.add(_text(s['id']));
-                                    }
-                                  } else {
-                                    for (final s in activeVisible) {
-                                      _selectedStudentIds
-                                          .remove(_text(s['id']));
-                                    }
-                                  }
-                                });
-                              },
-                      ),
-                      Text(
-                        'મળેલા વિદ્યાર્થીઓ: ${visible.length} (Select All Active: ${activeVisible.length})',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 13,
-                          color: Color(0xFF1E293B),
-                        ),
-                      ),
-                    ],
+                  Text(
+                    'મળેલા વિદ્યાર્થીઓ: ${visible.length} (સક્રિય: ${activeVisible.length})',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 13,
+                      color: Color(0xFF1E293B),
+                    ),
                   ),
                   Wrap(
                     spacing: 8,
@@ -1259,19 +1386,6 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
-                            if (isAct && !widget.readOnly)
-                              Checkbox(
-                                value: _selectedStudentIds.contains(sid),
-                                onChanged: (v) {
-                                  setState(() {
-                                    if (v == true) {
-                                      _selectedStudentIds.add(sid);
-                                    } else {
-                                      _selectedStudentIds.remove(sid);
-                                    }
-                                  });
-                                },
-                              ),
                             CircleAvatar(
                               radius: 18,
                               backgroundColor: isAct
@@ -1291,7 +1405,8 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                             const SizedBox(width: 10),
                             Expanded(
                               child: InkWell(
-                                onTap: () => widget.readOnly
+                                onTap: () => (widget.readOnly ||
+                                        !_canManageStudentClass(_text(s['class_id'])))
                                     ? _showStudentWholeDataDialog(s)
                                     : _openStudentEditor(s),
                                 child: Column(
@@ -1388,7 +1503,8 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                                     size: 20,
                                   ),
                                 ),
-                                if (!widget.readOnly)
+                                if (!widget.readOnly &&
+                                    _canManageStudentClass(_text(s['class_id'])))
                                   FilledButton.tonalIcon(
                                     style: FilledButton.styleFrom(
                                       visualDensity: VisualDensity.compact,
@@ -1412,9 +1528,11 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                                       ),
                                     ),
                                   ),
-                                if (!widget.readOnly && isAct)
+                                if (!widget.readOnly &&
+                                    isAct &&
+                                    _canManageStudentClass(_text(s['class_id'])))
                                   IconButton(
-                                    tooltip: 'Deactivate / નિષ્ક્રિય કરો',
+                                    tooltip: 'Deactivate / નિષ્ક્રિય કરો (માત્ર વર્ગ શિક્ષક / Admin)',
                                     visualDensity: VisualDensity.compact,
                                     onPressed: _saving
                                         ? null
@@ -1425,7 +1543,7 @@ class _GlobalStudentSearchCardState extends State<GlobalStudentSearchCard> {
                                       size: 20,
                                     ),
                                   ),
-                                if (!widget.readOnly && !isAct)
+                                if (!widget.readOnly && !isAct && _isAdmin)
                                   FilledButton.tonalIcon(
                                     style: FilledButton.styleFrom(
                                       backgroundColor: const Color(0xFFD1FAE5),

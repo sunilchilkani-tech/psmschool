@@ -144,8 +144,18 @@ class _ArchivedStudentsScreenState extends State<ArchivedStudentsScreen> {
   String _reasonLabel(dynamic value) {
     final r = _text(value).toLowerCase();
     if (r == 'promoted_graduated') return 'Promoted / Graduated (વર્ગ બઢતી)';
-    if (r == 'lc') return 'LC / શાળા છોડી';
-    if (r.isEmpty) return 'Deactive (નિષ્ક્રિય)';
+    if (r == 'continuous_absence' ||
+        r == 'long_absence' ||
+        (r.contains('સતત') && r.contains('ગેરહાજ'))) {
+      return 'સતત ગેરહાજરીથી નામ કમી કરેલ';
+    }
+    if (r == 'lc' ||
+        r == 'deactive' ||
+        r == 'other' ||
+        r.contains('લિ. સર્ટી') ||
+        r.isEmpty) {
+      return 'ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ';
+    }
     return r;
   }
 
@@ -364,30 +374,87 @@ class _ArchivedStudentsScreenState extends State<ArchivedStudentsScreen> {
       );
       return;
     }
+    var selectedDate = DateTime.now();
+    var selectedReason = 'lc';
     final accepted = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('વિદ્યાર્થીને નિષ્ક્રિય કરો (Make Student Deactive)'),
-        content: Text(
-          'શું તમે "${_text(row['name'])}" (GR: ${_text(row['gr']).isEmpty ? '—' : _text(row['gr'])}) ને નિષ્ક્રિય (Deactive) કરવા માંગો છો? (તેમનો ડેટા ડિલીટ નહીં થાય અને Admin ગમે ત્યારે પાછા Active કરી શકશે.)',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('રદ કરો (Cancel)'),
-          ),
-          FilledButton.icon(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final dateIso =
+              '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
+          final dateDmy =
+              '${selectedDate.day.toString().padLeft(2, '0')}/${selectedDate.month.toString().padLeft(2, '0')}/${selectedDate.year}';
+          return AlertDialog(
+            title: const Text('વિદ્યાર્થીને નિષ્ક્રિય કરો (Make Student Deactive)'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'શું તમે "${_text(row['name'])}" (GR: ${_text(row['gr']).isEmpty ? '—' : _text(row['gr'])}) ને નિષ્ક્રિય (Deactive) કરવા માંગો છો?',
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: ctx,
+                      initialDate: selectedDate,
+                      firstDate: DateTime(2000, 1, 1),
+                      lastDate: DateTime.now().add(const Duration(days: 365)),
+                    );
+                    if (picked != null) {
+                      setDialogState(() => selectedDate = picked);
+                    }
+                  },
+                  icon: const Icon(Icons.event_outlined),
+                  label: Text('શાળા છોડ્યાની / કમી તારીખ: $dateDmy ($dateIso)'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  initialValue: selectedReason,
+                  decoration: const InputDecoration(
+                    labelText: 'હાજરીપત્રકના મુખપૃષ્ઠ મુજબ કમી કરવાનું કારણ',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'lc',
+                      child: Text('ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'continuous_absence',
+                      child: Text('સતત ગેરહાજરીથી નામ કમી કરેલ'),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setDialogState(() => selectedReason = v);
+                  },
+                ),
+              ],
             ),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            icon: const Icon(Icons.person_off_outlined),
-            label: const Text('નિષ્ક્રિય કરો (Make Deactive)'),
-          ),
-        ],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('રદ કરો (Cancel)'),
+              ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(dialogContext).colorScheme.error,
+                ),
+                onPressed: () => Navigator.pop(dialogContext, true),
+                icon: const Icon(Icons.person_off_outlined),
+                label: const Text('નિષ્ક્રિય કરો (Make Deactive)'),
+              ),
+            ],
+          );
+        },
       ),
     );
     if (accepted != true || !mounted) return;
+    final leavingIso =
+        '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
     setState(() {
       _loading = true;
       _error = null;
@@ -401,7 +468,8 @@ class _ArchivedStudentsScreenState extends State<ArchivedStudentsScreen> {
         'psm_archive_student_and_shift_rolls',
         params: <String, dynamic>{
           'p_student_id': targetId,
-          'p_exit_reason': 'deactive',
+          'p_exit_date': leavingIso,
+          'p_exit_reason': selectedReason,
         },
       );
       FirestoreQueryBuilder.invalidateCache('students');

@@ -240,16 +240,81 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
   List<Map<String, dynamic>> get _activeLoans =>
       _transactions.where(_isIssued).toList();
 
-  List<Map<String, dynamic>> get _selectedBorrowerLoans => _activeLoans.where((tx) {
-        if (_borrowerType == 'student') {
-          return _selectedStudentId.isNotEmpty &&
-              _clean(tx['borrower_type']) == 'student' &&
-              _clean(tx['student_id']) == _selectedStudentId;
+  String _normRoll(dynamic raw) {
+    const guj = '૦૧૨૩૪૫૬૭૮૯';
+    var s = _clean(raw).toLowerCase();
+    for (var i = 0; i < guj.length; i++) {
+      s = s.replaceAll(guj[i], '$i');
+    }
+    final asInt = int.tryParse(s);
+    if (asInt != null) return '$asInt';
+    return s;
+  }
+
+  String _liveRollForLoan(Map<String, dynamic> tx) {
+    final sid = _clean(tx['student_id']);
+    if (sid.isNotEmpty) {
+      final st = _findById(_students, sid);
+      final r = _clean(st?['roll_number']);
+      if (r.isNotEmpty) return r;
+    }
+    return _clean(tx['roll_number_snapshot'], fallback: '—');
+  }
+
+  String _liveStudentNameForLoan(Map<String, dynamic> tx) {
+    final sid = _clean(tx['student_id']);
+    if (sid.isNotEmpty) {
+      final st = _findById(_students, sid);
+      final n = _clean(st?['name']);
+      if (n.isNotEmpty) return n;
+    }
+    return _borrowerName(tx);
+  }
+
+  List<Map<String, dynamic>> get _selectedClassActiveLoans {
+    if (_selectedClassId.isEmpty) return <Map<String, dynamic>>[];
+    final label = _classLabel(_selectedClassId);
+    final list = _activeLoans.where((tx) {
+      if (_clean(tx['borrower_type']) != 'student') return false;
+      final txClassId = _clean(tx['class_id']);
+      if (txClassId.isNotEmpty) return txClassId == _selectedClassId;
+      return label.isNotEmpty && _clean(tx['class_label_snapshot']) == label;
+    }).toList();
+    list.sort((a, b) {
+      final rA = int.tryParse(_normRoll(_liveRollForLoan(a))) ?? 999999;
+      final rB = int.tryParse(_normRoll(_liveRollForLoan(b))) ?? 999999;
+      if (rA != rB) return rA.compareTo(rB);
+      return _clean(a['book_number_snapshot']).compareTo(_clean(b['book_number_snapshot']));
+    });
+    return list;
+  }
+
+  List<Map<String, dynamic>> get _selectedBorrowerLoans {
+    if (_borrowerType == 'student') {
+      final typedRoll = _normRoll(_rollController.text);
+      return _activeLoans.where((tx) {
+        if (_clean(tx['borrower_type']) != 'student') return false;
+        if (_selectedStudentId.isNotEmpty && _clean(tx['student_id']) == _selectedStudentId) {
+          return true;
         }
-        return _selectedTeacherId.isNotEmpty &&
-            _clean(tx['borrower_type']) == 'teacher' &&
-            _clean(tx['teacher_borrower_id']) == _selectedTeacherId;
+        // Fallback if roll number is typed and matches an active loan in the selected class
+        if (_selectedClassId.isNotEmpty && typedRoll.isNotEmpty) {
+          final sameClass = _clean(tx['class_id']) == _selectedClassId ||
+              (_classLabel(_selectedClassId).isNotEmpty &&
+                  _clean(tx['class_label_snapshot']) == _classLabel(_selectedClassId));
+          if (sameClass && _normRoll(_liveRollForLoan(tx)) == typedRoll) {
+            return true;
+          }
+        }
+        return false;
       }).toList();
+    }
+    return _activeLoans.where((tx) {
+      return _selectedTeacherId.isNotEmpty &&
+          _clean(tx['borrower_type']) == 'teacher' &&
+          _clean(tx['teacher_borrower_id']) == _selectedTeacherId;
+    }).toList();
+  }
 
   List<Map<String, dynamic>> get _reportTransactions => _transactions.where((tx) {
         final issueDate = _parseDate(tx['issue_date']);
@@ -406,21 +471,29 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
   }
 
   void _findStudent({bool notifyMissing = true}) {
-    final roll = _rollController.text.trim().toLowerCase();
+    final roll = _normRoll(_rollController.text);
     if (_selectedClassId.isEmpty || roll.isEmpty) {
-      setState(() => _selectedStudentId = '');
+      setState(() {
+        _selectedStudentId = '';
+        _selectedReturnTransactionId = '';
+      });
       if (notifyMissing) _message('પહેલા વર્ગ પસંદ કરો અને વિદ્યાર્થીનો રોલ નંબર દાખલ કરો.', warning: true);
       return;
     }
     Map<String, dynamic>? found;
     for (final student in _students) {
-      if (_clean(student['roll_number']).toLowerCase() == roll) {
+      if (_normRoll(student['roll_number']) == roll) {
         found = student;
         break;
       }
     }
-    setState(() => _selectedStudentId = _clean(found?['id']));
-    if (found == null && notifyMissing) {
+    final foundId = _clean(found?['id']);
+    setState(() {
+      _selectedStudentId = foundId;
+      final loans = _selectedBorrowerLoans;
+      _selectedReturnTransactionId = loans.isNotEmpty ? _clean(loans.first['id']) : '';
+    });
+    if (found == null && _selectedBorrowerLoans.isEmpty && notifyMissing) {
       _message('આ વર્ગમાં આ રોલ નંબરનો સક્રિય વિદ્યાર્થી મળ્યો નથી.', error: true);
     }
   }
@@ -587,6 +660,115 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
         _selectedReturnTransactionId = '';
         _returnDate = _today();
       });
+      await _refresh(quiet: true);
+    } catch (error) {
+      _message(_friendlyError(error), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
+  }
+
+  Future<void> _quickReturnLoan(Map<String, dynamic> loan) async {
+    if (_readOnly) {
+      _message('આ શાળા હાલમાં માત્ર રિપોર્ટ જોવા માટે ખુલ્લી છે.', warning: true);
+      return;
+    }
+    if (!_isIssued(loan)) {
+      _message('આ પુસ્તક પહેલેથી પરત થઈ ચૂક્યું છે.', warning: true);
+      return;
+    }
+    final loanClassId = _clean(loan['class_id'], fallback: _selectedClassId);
+    if (!_isAdmin && _clean(loan['borrower_type']) == 'student' && !_canManageStudentClass(loanClassId)) {
+      _message('તમારા લૉગિનને આ વર્ગના પુસ્તક પરત લેવાની પરવાનગી નથી.', warning: true);
+      return;
+    }
+
+    var pickedReturnDate = _today();
+    final issueDt = _parseDate(loan['issue_date']);
+    if (issueDt != null && pickedReturnDate.isBefore(issueDt)) {
+      pickedReturnDate = issueDt;
+    }
+    final remarksCtrl = TextEditingController();
+    final rollDisp = _liveRollForLoan(loan);
+    final studentDisp = _liveStudentNameForLoan(loan);
+    final bookNoDisp = _clean(loan['book_number_snapshot']);
+    final bookNameDisp = _clean(loan['book_name_snapshot']);
+
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('📗 પુસ્તક પરત લેવાની પુષ્ટિ / Return Book'),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'વિદ્યાર્થી: $studentDisp (રોલ નંબર: $rollDisp)',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'પુસ્તક નંબર: $bookNoDisp  •  પુસ્તકનું નામ: $bookNameDisp',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Text('આપ્યા તારીખ: ${_dateText(loan['issue_date'])}  •  મુદત: ${_dateText(loan['due_date'])}'),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final d = await _pickDate(pickedReturnDate, notBefore: issueDt);
+                    if (d != null) {
+                      setDialogState(() => pickedReturnDate = d);
+                    }
+                  },
+                  icon: const Icon(Icons.calendar_month_outlined),
+                  label: Text('પરત તારીખ: ${_dateText(_iso(pickedReturnDate))} (તારીખ બદલો)'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: remarksCtrl,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'પરત અંગે નોંધ (વૈકલ્પિક)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('રદ કરો'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              icon: const Icon(Icons.assignment_turned_in_outlined),
+              label: const Text('હા, પુસ્તક પરત લો'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final remarks = remarksCtrl.text.trim();
+    remarksCtrl.dispose();
+    if (approved != true || !mounted) return;
+
+    setState(() => _actionBusy = true);
+    try {
+      await _service.returnBook(
+        transactionId: _clean(loan['id']),
+        returnDate: pickedReturnDate,
+        remarks: remarks,
+      );
+      _message('પુસ્તક નં. $bookNoDisp ($studentDisp) સફળતાપૂર્વક પરત નોંધાયું.');
+      if (_selectedReturnTransactionId == _clean(loan['id'])) {
+        _selectedReturnTransactionId = '';
+      }
       await _refresh(quiet: true);
     } catch (error) {
       _message(_friendlyError(error), error: true);
@@ -1240,15 +1422,29 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
         final end = _parseDate(tx['return_date']) ?? _today();
         return _daysBetween(issue, end).clamp(0, 1000000).toInt();
       }
-      List<String> transactionRow(Map<String, dynamic> tx) => <String>[
-        _clean(tx['id']), _clean(tx['book_number_snapshot']), _clean(tx['book_name_snapshot']),
-        _clean(tx['borrower_type']) == 'teacher' ? 'શિક્ષક / Teacher' : 'વિદ્યાર્થી / Student',
-        _borrowerName(tx), _clean(tx['class_label_snapshot']), _clean(tx['roll_number_snapshot']),
-        _clean(tx['issue_date']), _clean(tx['due_date']), _clean(tx['return_date']),
-        _isIssued(tx) ? 'જારી / Issued' : 'પરત / Returned', '${daysKept(tx)}',
-        '${_overdueDays(tx)}', _calculatedFine(tx).toStringAsFixed(2),
-        _clean(tx['recorded_by_teacher_name']), _clean(tx['issue_remarks']), _clean(tx['return_remarks']),
-      ];
+      final liveStudentById = <String, Map<String, dynamic>>{
+        for (final st in registeredStudents)
+          if (_clean(st['id']).isNotEmpty) _clean(st['id']): st,
+      };
+      List<String> transactionRow(Map<String, dynamic> tx) {
+        final sid = _clean(tx['student_id']);
+        final liveSt = (_isIssued(tx) && sid.isNotEmpty) ? liveStudentById[sid] : null;
+        final liveClass = liveSt != null
+            ? _clean(liveSt['library_class_label'], fallback: _clean(tx['class_label_snapshot']))
+            : _clean(tx['class_label_snapshot']);
+        final liveRoll = liveSt != null
+            ? _clean(liveSt['roll_number'], fallback: _clean(tx['roll_number_snapshot']))
+            : _clean(tx['roll_number_snapshot']);
+        return <String>[
+          _clean(tx['id']), _clean(tx['book_number_snapshot']), _clean(tx['book_name_snapshot']),
+          _clean(tx['borrower_type']) == 'teacher' ? 'શિક્ષક / Teacher' : 'વિદ્યાર્થી / Student',
+          _borrowerName(tx), liveClass, liveRoll,
+          _clean(tx['issue_date']), _clean(tx['due_date']), _clean(tx['return_date']),
+          _isIssued(tx) ? 'જારી / Issued' : 'પરત / Returned', '${daysKept(tx)}',
+          '${_overdueDays(tx)}', _calculatedFine(tx).toStringAsFixed(2),
+          _clean(tx['recorded_by_teacher_name']), _clean(tx['issue_remarks']), _clean(tx['return_remarks']),
+        ];
+      }
       addSheet('Transactions', <List<String>>[transactionHeaders, ...rows.map(transactionRow)]);
       addSheet('Currently Issued', <List<String>>[transactionHeaders, ...issued.map(transactionRow)]);
       addSheet('Returned History', <List<String>>[transactionHeaders, ...returned.map(transactionRow)]);
@@ -1966,10 +2162,14 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
             textInputAction: TextInputAction.search,
             decoration: const InputDecoration(labelText: 'વિદ્યાર્થીનો રોલ નંબર', hintText: 'ઉદા. 12 / Roll Number', prefixIcon: Icon(Icons.numbers)),
             onChanged: (_) {
-              final roll = _rollController.text.trim().toLowerCase();
-              final matches = _students.where((s) => _clean(s['roll_number']).toLowerCase() == roll);
+              final roll = _normRoll(_rollController.text);
+              final matches = _students.where((s) => _normRoll(s['roll_number']) == roll);
               final found = matches.isEmpty ? null : matches.first;
-              setState(() => _selectedStudentId = found == null ? '' : _clean(found['id']));
+              setState(() {
+                _selectedStudentId = found == null ? '' : _clean(found['id']);
+                final loans = _selectedBorrowerLoans;
+                _selectedReturnTransactionId = loans.isNotEmpty ? _clean(loans.first['id']) : '';
+              });
             },
             onSubmitted: (_) => _findStudent(),
           )),
@@ -1985,6 +2185,14 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
           )
         else
           _emptyCard('વિદ્યાર્થીની વિગતો', 'વર્ગ પસંદ કરો અને શાળાના રજિસ્ટરમાં નોંધાયેલ રોલ નંબર દાખલ કરો.'),
+        if (activeLoans.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          _buildSelectedStudentIssuedBooksBanner(activeLoans),
+        ],
+        if (_selectedClassId.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _buildClassIssuedBooksCard(),
+        ],
       ] else ...[
         DropdownButtonFormField<String>(
           value: _selectedTeacherId.isEmpty ? null : _selectedTeacherId,
@@ -2025,6 +2233,190 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
         color: Theme.of(context).colorScheme.primaryContainer.withOpacity(.45),
         child: ListTile(leading: Icon(icon, size: 32), title: Text(name, style: const TextStyle(fontWeight: FontWeight.w800)), subtitle: Text(subtitle)),
       );
+
+  Widget _buildSelectedStudentIssuedBooksBanner(List<Map<String, dynamic>> loans) {
+    final canReturn = !_readOnly && (_isAdmin || _canManageStudentClass(_selectedClassId));
+    return Card(
+      color: Colors.amber.shade50,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.amber.shade700, width: 1.4),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.menu_book_rounded, color: Colors.amber.shade900),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'આ વિદ્યાર્થી પાસે હાલમાં ${loans.length} પુસ્તક જારી છે (અહીંથી સીધું પરત લઈ શકાશે):',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      color: Colors.amber.shade900,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            for (final tx in loans)
+              Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.amber.shade300),
+                ),
+                child: Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'રોલ નં.: ${_liveRollForLoan(tx)}  •  ${_liveStudentNameForLoan(tx)}',
+                          style: const TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                        Text(
+                          'પુસ્તક નં.: ${_clean(tx['book_number_snapshot'])}  —  ${_clean(tx['book_name_snapshot'])}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            color: Colors.indigo.shade900,
+                          ),
+                        ),
+                        Text(
+                          'આપ્યા તા.: ${_dateText(tx['issue_date'])}  •  છેલ્લી તા.: ${_dateText(tx['due_date'])}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.green.shade700,
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: (_actionBusy || !canReturn) ? null : () => _quickReturnLoan(tx),
+                      icon: const Icon(Icons.assignment_turned_in_outlined, size: 18),
+                      label: const Text('📗 પુસ્તક પરત લો (Return)'),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildClassIssuedBooksCard() {
+    final classLoans = _selectedClassActiveLoans;
+    final className = _classLabel(_selectedClassId);
+    final canReturn = !_readOnly && (_isAdmin || _canManageStudentClass(_selectedClassId));
+
+    return Card(
+      color: Colors.blueGrey.shade50,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.indigo.shade200, width: 1.2),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.library_books_outlined, color: Colors.indigo.shade900),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '📖 $className માં હાલ પુસ્તક આપેલ વિદ્યાર્થીઓ (${classLoans.length})',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 14.5,
+                      color: Colors.indigo.shade900,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (classLoans.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 4),
+                child: Text('આ વર્ગમાં હાલ કોઈ વિદ્યાર્થી પાસે પુસ્તક જારી નથી.'),
+              )
+            else
+              for (final tx in classLoans)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.indigo.shade100),
+                  ),
+                  child: Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      InkWell(
+                        onTap: () {
+                          final roll = _liveRollForLoan(tx);
+                          setState(() {
+                            _selectedStudentId = _clean(tx['student_id']);
+                            if (roll != '—') _rollController.text = roll;
+                            _selectedReturnTransactionId = _clean(tx['id']);
+                          });
+                        },
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'રોલ નં.: ${_liveRollForLoan(tx)}  •  ${_liveStudentNameForLoan(tx)}',
+                              style: const TextStyle(fontWeight: FontWeight.w800),
+                            ),
+                            Text(
+                              'પુસ્તક નં.: ${_clean(tx['book_number_snapshot'])}  —  ${_clean(tx['book_name_snapshot'])}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: Colors.indigo.shade800,
+                              ),
+                            ),
+                            Text(
+                              'આપ્યા તા.: ${_dateText(tx['issue_date'])}  •  મુદત: ${_dateText(tx['due_date'])}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                      FilledButton.tonalIcon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.green.shade50,
+                          foregroundColor: Colors.green.shade900,
+                        ),
+                        onPressed: (_actionBusy || !canReturn) ? null : () => _quickReturnLoan(tx),
+                        icon: const Icon(Icons.assignment_turned_in_outlined, size: 18),
+                        label: const Text('📗 પરત લો (Return)'),
+                      ),
+                    ],
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _issueForm(Map<String, dynamic>? borrower, Map<String, dynamic>? book) => ListView(
         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -2162,12 +2554,21 @@ class _SupabaseLibraryScreenState extends State<SupabaseLibraryScreen> with Tick
                 await _loadStudentsForClass(classId);
               }
               if (!mounted) return;
+              final sid = _clean(tx['student_id']);
+              final matchedStudent = sid.isEmpty
+                  ? null
+                  : _students.cast<Map<String, dynamic>?>().firstWhere(
+                        (s) => _clean(s?['id']) == sid,
+                        orElse: () => null,
+                      );
               setState(() {
                 _borrowerType = borrowerType;
                 _selectedClassId = classId;
-                _selectedStudentId = _clean(tx['student_id']);
+                _selectedStudentId = sid;
                 _selectedTeacherId = _clean(tx['teacher_borrower_id']);
-                _rollController.text = _clean(tx['roll_number_snapshot']);
+                _rollController.text = matchedStudent != null
+                    ? _clean(matchedStudent['roll_number'], fallback: _clean(tx['roll_number_snapshot']))
+                    : _clean(tx['roll_number_snapshot']);
                 _selectedReturnTransactionId = _clean(tx['id']);
                 _returnDate = _today();
               });

@@ -6,6 +6,7 @@ import 'package:share_plus/share_plus.dart';
 import 'psm_file_saver_stub.dart'
     if (dart.library.html) 'psm_file_saver_web.dart'
     if (dart.library.io) 'psm_file_saver_io.dart' as saver;
+import 'xlsx_sanitizer.dart';
 
 /// Saves directly from web/desktop. Mobile continues to use the share sheet.
 class PsmFileExportHelper {
@@ -15,20 +16,24 @@ class PsmFileExportHelper {
     required String title,
     required String mimeType,
   }) async {
+    final isXlsx = filename.toLowerCase().endsWith('.xlsx') ||
+        mimeType.toLowerCase().contains('spreadsheetml');
+    final safeBytes = isXlsx ? XlsxSanitizer.clean(bytes) : bytes;
+
     final isDesktopOrWeb = kIsWeb ||
         defaultTargetPlatform == TargetPlatform.windows ||
         defaultTargetPlatform == TargetPlatform.macOS ||
         defaultTargetPlatform == TargetPlatform.linux;
 
     if (isDesktopOrWeb) {
-      await saver.saveBytesToDevice(bytes, filename, mimeType);
+      await saver.saveBytesToDevice(safeBytes, filename, mimeType);
       return;
     }
 
     await SharePlus.instance.share(ShareParams(
       title: title,
       files: <XFile>[
-        XFile.fromData(bytes, name: filename, mimeType: mimeType),
+        XFile.fromData(safeBytes, name: filename, mimeType: mimeType),
       ],
     ));
   }

@@ -1046,8 +1046,9 @@ class ResultXlsxTemplateExporter {
               _columnNumber(m.group(2)!) <= maxAllowedCol)
           .map((m) => m.group(0)!)
           .toList();
-      final replacement =
-          '<mergeCells count="${mergeTags.length}">${mergeTags.join()}</mergeCells>';
+      final replacement = mergeTags.isEmpty
+          ? ''
+          : '<mergeCells count="${mergeTags.length}">${mergeTags.join()}</mergeCells>';
       updated = updated.replaceRange(
         mergeMatch.start,
         mergeMatch.end,

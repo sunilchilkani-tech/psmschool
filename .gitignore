@@ -36,3 +36,21 @@ __pycache__/
 
 __pycache__/
 *.pyc
+
+# Firebase generated deployment cache
+.firebase/
+
+# Backup files
+*.bak
+*.bak_*
+
+# Flutter generated files
+.dart_tool/
+build/
+
+# Firebase deployment cache
+.firebase/
+
+# Temporary and backup files
+*.bak
+*.bak_*

@@ -17,6 +17,9 @@ import 'archived_students_screen.dart';
 import 'student_bulk_import_screen.dart';
 import 'supabase_hajari_patrak_screen.dart';
 import '../services/school_class_order.dart';
+import 'package:share_plus/share_plus.dart';
+import '../services/school_export_service.dart';
+import 'supabase_whole_school_result_summary_screen.dart';
 import '../services/datewise_report_columns.dart';
 import '../services/supabase_report_export_service.dart';
 
@@ -25,6 +28,7 @@ import '../services/supabase_leave_pdf_service.dart';
 import '../theme/display_scale.dart';
 import 'package:pmshri_attendance/services/class_label.dart';
 import '../theme/responsive.dart';
+import '../widgets/admin_daily_attendance_dashboard.dart';
 
 /// Supabase-native Admin Centre. All write operations are additionally guarded
 /// by the existing table/storage RLS policies; hiding buttons is not the only guard.
@@ -250,6 +254,36 @@ class _SupabaseAdminCenterScreenState extends State<SupabaseAdminCenterScreen> {
                 ? 2
                 : 1;
             final features = <_AdminFeature>[
+              _AdminFeature(
+                Icons.dashboard_customize_rounded,
+                'દૈનિક હાજરી, પીએમ પોષણ અને અલ્પાહાર ડેશબોર્ડ / Daily Attendance Live Dashboard',
+                'રિપોર્ટ જનરેટ કર્યા વગર લાઈવ દૈનિક અહેવાલ જુઓ, કયા વર્ગની હાજરી / પીએમ પોષણ / અલ્પાહાર બાકી છે તે જુઓ અને ૧ ક્લિકથી શિક્ષકને WhatsApp રીમાઈન્ડર મોકલો.',
+                () => _push(
+                  context,
+                  SupabaseAdminDailyDashboardScreen(profile: profile),
+                ),
+              ),
+              _AdminFeature(
+                Icons.verified_user_outlined,
+                'Teacher Attendance Permission / શિક્ષક હાજરી પૂરવાની પરવાનગી (4 Modes + Leave Charge)',
+                'નક્કી કરો કે કયા શિક્ષક હાજરી (PM POSHAN અને અલ્પાહાર સાથે) પૂરી શકે: (1) માત્ર વર્ગ શિક્ષક, (2) ધોરણના વિભાગવાર વર્ગ શિક્ષકો (6A, 6B, 6C...), (3) વિષય + વર્ગ શિક્ષક, કે (4) કોઈપણ શિક્ષક (રજા ચાર્જ નિયમ સાથે).',
+                () => _push(context, const SupabaseAttendancePermissionScreen()),
+              ),
+              _AdminFeature(
+                Icons.analytics_rounded,
+                'સમગ્ર શાળાનું સત્રવાર પરિણામ સારાંશ (All 3 Formats)',
+                '૧ ક્લિકમાં સમગ્ર શાળાના ત્રણેય પરિણામ સારાંશ પત્રકો (Class-Section, Category-Grade અને Whole School Performance) શાળાના લોગો સાથે પ્રિન્ટ / Excel કરો.',
+                () => _push(
+                  context,
+                  SupabaseWholeSchoolResultSummaryScreen(profile: profile),
+                ),
+              ),
+              _AdminFeature(
+                Icons.sim_card_download_outlined,
+                'સંપૂર્ણ શાળા ડેટા ડાઉનલોડ / Download Whole School Data (Excel)',
+                'વિદ્યાર્થીઓ, હાજરી, પરિણામ, રોજમેળ, પુસ્તકાલય, શિક્ષકો અને શાળાના તમામ પત્રકોનો સંપૂર્ણ બેકઅપ Excel (.xlsx) ફાઈલમાં ડાઉનલોડ કરો.',
+                () => _downloadWholeSchoolData(context),
+              ),
               if (_devSharedFiles.isNotEmpty)
                 _AdminFeature(
                   Icons.cloud_download_outlined,
@@ -363,7 +397,7 @@ class _SupabaseAdminCenterScreenState extends State<SupabaseAdminCenterScreen> {
               _AdminFeature(
                 Icons.rule_folder_outlined,
                 'Attendance Modes & Unfreeze / હાજરી મોડ અને અનફ્રીઝ',
-                'Turn 3-step save and Direct Entry on/off, and unfreeze submitted attendance (all steps or only Present / PM POSHAN / Breakfast).',
+                'Turn 3-step save and Direct Entry on/off, configure teacher attendance permissions, and unfreeze submitted attendance.',
                 () => _push(context, const SupabaseAttendanceFreezeManageScreen()),
               ),
               _AdminFeature(
@@ -481,6 +515,11 @@ class _SupabaseAdminCenterScreenState extends State<SupabaseAdminCenterScreen> {
                   itemBuilder: (context, index) =>
                       _AdminFeatureCard(feature: shown[index]),
                 ),
+                const SizedBox(height: 18),
+                AdminDailyAttendanceDashboard(
+                  profile: profile,
+                  initiallyExpanded: true,
+                ),
               ],
             );
           },
@@ -501,6 +540,46 @@ class _SupabaseAdminCenterScreenState extends State<SupabaseAdminCenterScreen> {
 
   static void _push(BuildContext context, Widget screen) {
     Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => screen));
+  }
+
+  Future<void> _downloadWholeSchoolData(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('સંપૂર્ણ શાળાનો ડેટા તૈયાર થઈ રહ્યો છે (Preparing Whole School Excel Backup)...'),
+      ),
+    );
+    try {
+      final bundle = await SchoolExportService().exportForCurrentUser(
+        includePrivateDetails: true,
+      );
+      await SharePlus.instance.share(
+        ShareParams(
+          files: <XFile>[
+            XFile.fromData(
+              bundle.bytes,
+              mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              name: bundle.fileName,
+            ),
+          ],
+          text: bundle.fileName,
+        ),
+      );
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('સંપૂર્ણ શાળાનો ડેટા ડાઉનલોડ થયો: ${bundle.fileName}'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.red.shade700,
+          content: Text('Export failed: $e'),
+        ),
+      );
+    }
   }
 }
 
@@ -1052,9 +1131,27 @@ class _SupabaseAdminMessagesTabState extends State<SupabaseAdminMessagesTab> {
         collected.addAll(page.map((row) => Map<String, dynamic>.from(row)));
         offset += page.length;
       }
+      final nowIst =
+          DateTime.now().toUtc().add(const Duration(hours: 5, minutes: 30));
+      final todayIso = _dateIso(nowIst);
+      final activeRecords = <Map<String, dynamic>>[];
+      for (final row in collected) {
+        final mDate = '${row['message_date'] ?? ''}'.trim();
+        if (mDate.length >= 10 && mDate.substring(0, 10).compareTo(todayIso) < 0) {
+          try {
+            await _client
+                .from('school_admin_messages')
+                .delete()
+                .eq('school_ref', school)
+                .eq('message_date', mDate);
+          } catch (_) {}
+          continue;
+        }
+        activeRecords.add(row);
+      }
       if (!mounted) return;
       setState(() {
-        _records = collected;
+        _records = activeRecords;
         _loading = false;
       });
     } catch (error) {
@@ -1148,21 +1245,27 @@ class _SupabaseAdminMessagesTabState extends State<SupabaseAdminMessagesTab> {
       final m = msgIndex < 0 ? 1 : msgIndex;
       final school = await _schoolRef(_client);
       final teacher = await _teacherId(_client);
-      var imported = 0;
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      final payload = <Map<String, dynamic>>[];
       for (final row in rows.skip(1)) {
         if (row.length <= d || row.length <= m) continue;
         final date = _parseDate(row[d]);
         final message = row[m].trim();
         if (date == null || message.isEmpty) continue;
-        await _client.from('school_admin_messages').upsert(<String, dynamic>{
+        payload.add(<String, dynamic>{
           'school_ref': school,
           'message_date': _dateIso(date),
           'message': message,
           'created_by_teacher': teacher,
-          'updated_at': DateTime.now().toUtc().toIso8601String(),
-        }, onConflict: 'school_ref,message_date');
-        imported++;
+          'updated_at': nowIso,
+        });
       }
+      if (payload.isNotEmpty) {
+        await _client
+            .from('school_admin_messages')
+            .upsert(payload, onConflict: 'school_ref,message_date');
+      }
+      final imported = payload.length;
       await _load();
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1412,20 +1515,25 @@ class _SupabaseAdminHolidaysTabState extends State<SupabaseAdminHolidaysTab> {
       final r = reasonIndex < 0 ? 1 : reasonIndex;
       final school = await _schoolRef(_client);
       final teacher = await _teacherId(_client);
-      var imported = 0;
+      final payload = <Map<String, dynamic>>[];
       for (final row in rows.skip(1)) {
         if (row.length <= d) continue;
         final date = _parseDate(row[d]);
         if (date == null) continue;
         final reason = row.length > r ? row[r].trim() : '';
-        await _client.from('school_holidays').upsert(<String, dynamic>{
+        payload.add(<String, dynamic>{
           'school_ref': school,
           'holiday_date': _dateIso(date),
           'reason': reason,
           'created_by_teacher': teacher,
-        }, onConflict: 'school_ref,holiday_date');
-        imported++;
+        });
       }
+      if (payload.isNotEmpty) {
+        await _client
+            .from('school_holidays')
+            .upsert(payload, onConflict: 'school_ref,holiday_date');
+      }
+      final imported = payload.length;
       await _load();
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2027,6 +2135,7 @@ class _SupabaseLeaveApprovalsScreenState
             'status': status,
             'decision_note': note,
             'decided_by_teacher': _teacher,
+            'teacher_decision_notified': false,
             'updated_at': DateTime.now().toUtc().toIso8601String(),
           })
           .eq('school_ref', _school ?? await _schoolRef(_client))
@@ -2043,6 +2152,181 @@ class _SupabaseLeaveApprovalsScreenState
     } catch (error) {
       if (!mounted) return;
       await _showError(context, error);
+    }
+  }
+
+  Future<void> _deleteLeaveWithAdminPassword(Map<String, dynamic> row) async {
+    final leaveId = _text(row['id']);
+    if (leaveId.isEmpty) return;
+    final data = _leaveData(row);
+    final teacherName = _text(
+      data['teacher_name'],
+      _teacherName(_text(row['teacher_id'])),
+    );
+    final leaveType = _text(row['leave_type'], 'રજા');
+    final startDate = _text(row['start_date']);
+    final endDate = _text(row['end_date'], startDate);
+    final days = SupabaseLeavePdfService.totalDays(row);
+    final statusText = _statusLabel(_text(row['status'], 'pending'));
+
+    final pwdCtrl = TextEditingController();
+    var obscure = true;
+    var submitting = false;
+    String? dialogError;
+
+    final deleted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          Future<void> confirmDelete() async {
+            final pwd = pwdCtrl.text.trim();
+            if (pwd.isEmpty) {
+              setDialogState(
+                () => dialogError = 'કૃપા કરીને School Admin પાસવર્ડ દાખલ કરો.',
+              );
+              return;
+            }
+            setDialogState(() {
+              submitting = true;
+              dialogError = null;
+            });
+            try {
+              await _client.rpc(
+                'psm_admin_delete_leave_with_password',
+                params: <String, dynamic>{
+                  'p_leave_id': leaveId,
+                  'p_admin_password': pwd,
+                },
+              );
+              if (dialogContext.mounted) {
+                Navigator.of(dialogContext).pop(true);
+              }
+            } catch (e) {
+              setDialogState(() {
+                submitting = false;
+                dialogError = '$e'
+                    .replaceFirst('Exception: ', '')
+                    .replaceFirst('Bad state: ', '');
+              });
+            }
+          }
+
+          return AlertDialog(
+            title: Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.red.shade700),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('રજા રેકોર્ડ કાયમ માટે કાઢી નાખવો?'),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 480,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'શિક્ષક: $teacherName\n'
+                      'રજા: $leaveType ($statusText)\n'
+                      'તારીખ: $startDate થી $endDate ($days દિવસ)',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade50,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.red.shade300),
+                      ),
+                      child: Text(
+                        '⚠️ મહત્વપૂર્ણ ચેતવણી (Important Warning):\n'
+                        '• આ રજા તમામ રેકોર્ડ અને રિપોર્ટમાંથી કાયમ માટે દૂર થશે.\n'
+                        '• આ રજા શિક્ષકની વપરાયેલી રજા (Utilised Leave — C.L. / મરજિયાત / વળતર) માંથી પણ બાદ થઈ જશે (એટલે કે વપરાયેલી રજામાં ગણાશે નહીં).\n'
+                        '• આ ક્રિયા પાછી ફેરવી શકાશે નહીં.',
+                        style: TextStyle(
+                          color: Colors.red.shade900,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: pwdCtrl,
+                      obscureText: obscure,
+                      autofocus: true,
+                      enabled: !submitting,
+                      decoration: InputDecoration(
+                        labelText: 'School Admin પાસવર્ડ દાખલ કરો',
+                        border: const OutlineInputBorder(),
+                        prefixIcon: const Icon(Icons.lock_outline),
+                        errorText: dialogError,
+                        suffixIcon: IconButton(
+                          onPressed: () =>
+                              setDialogState(() => obscure = !obscure),
+                          icon: Icon(
+                            obscure
+                                ? Icons.visibility_outlined
+                                : Icons.visibility_off_outlined,
+                          ),
+                        ),
+                      ),
+                      onSubmitted: (_) => confirmDelete(),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: submitting
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(false),
+                child: const Text('રદ કરો'),
+              ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red.shade700,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: submitting ? null : confirmDelete,
+                icon: submitting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.delete_forever_outlined),
+                label: Text(
+                  submitting ? 'કાઢી રહ્યું છે…' : 'પાસવર્ડથી રજા કાઢી નાખો',
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    pwdCtrl.dispose();
+    if (deleted == true) {
+      await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'રજાનો રેકોર્ડ તમામ રજીસ્ટર અને વપરાયેલી રજામાંથી કાયમ માટે કાઢી નાખવામાં આવ્યો છે.',
+            ),
+          ),
+        );
+      }
     }
   }
 
@@ -2284,11 +2568,12 @@ class _SupabaseLeaveApprovalsScreenState
                     ),
                     if (_text(row['decision_note']).isNotEmpty)
                       Text('નોંધ: ${row['decision_note']}'),
-                    if (_text(row['status'], 'pending') == 'pending') ...[
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        children: [
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        if (_text(row['status'], 'pending') == 'pending') ...[
                           FilledButton.icon(
                             onPressed: () => _decide(row, 'approved'),
                             icon: const Icon(Icons.check),
@@ -2300,8 +2585,17 @@ class _SupabaseLeaveApprovalsScreenState
                             label: const Text('નામંજૂર કરો'),
                           ),
                         ],
-                      ),
-                    ],
+                        OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.red.shade700,
+                            side: BorderSide(color: Colors.red.shade300),
+                          ),
+                          onPressed: () => _deleteLeaveWithAdminPassword(row),
+                          icon: const Icon(Icons.delete_forever_outlined, size: 18),
+                          label: const Text('રજા કાઢી નાખો (Delete)'),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
@@ -3239,6 +3533,386 @@ class _SupabaseCustomHeadersScreenState
 }
 
 
+class SupabaseAttendancePermissionScreen extends StatelessWidget {
+  const SupabaseAttendancePermissionScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Teacher Attendance Permission / હાજરી પૂરવાની પરવાનગી',
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: const [
+          SupabaseAttendancePermissionControlCard(),
+        ],
+      ),
+    );
+  }
+}
+
+class SupabaseAttendancePermissionControlCard extends StatefulWidget {
+  const SupabaseAttendancePermissionControlCard({super.key});
+
+  @override
+  State<SupabaseAttendancePermissionControlCard> createState() =>
+      _SupabaseAttendancePermissionControlCardState();
+}
+
+class _SupabaseAttendancePermissionControlCardState
+    extends State<SupabaseAttendancePermissionControlCard> {
+  final SupabaseClient _client = Supabase.instance.client;
+  String _permissionMode = 'subject_and_class_teachers';
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+
+  static const List<(String, String, String, bool)> _modes =
+      <(String, String, String, bool)>[
+    (
+      'only_class_teacher',
+      '1️⃣ માત્ર વર્ગ શિક્ષક જ હાજરી પૂરી શકે (Only Class Teacher)',
+      'જે વર્ગના વર્ગ શિક્ષક (Class Teacher) તરીકે નિમણૂક થઈ હોય માત્ર તે જ શિક્ષક પોતાના વર્ગની હાજરી (PM POSHAN અને અલ્પાહાર સાથે) પૂરી શકશે. (રજા દરમિયાન ચાર્જ સંભાળનાર ઇન્ચાર્જ શિક્ષક માત્ર રજાના દિવસો પૂરતી હાજરી પૂરી શકશે).',
+      true,
+    ),
+    (
+      'section_wise_class_teachers',
+      '2️⃣ ધોરણના બધા વિભાગના વર્ગ શિક્ષકો (Section-Wise Class Teachers: 6A, 6B, 6C...)',
+      'એક જ ધોરણના કોઈપણ વિભાગના વર્ગ શિક્ષક તે ધોરણના તમામ વિભાગોની હાજરી પૂરી શકશે — દા.ત. ધોરણ 6A ના વર્ગ શિક્ષક ધોરણ 6A, 6B, 6C, 6D... ની હાજરી પૂરી શકશે અને ધોરણ 6B ના વર્ગ શિક્ષક પણ 6A, 6B, 6C, 6D... ની હાજરી પૂરી શકશે. (રજા દરમિયાન ચાર્જ શિક્ષક પર પણ આ નિયમ લાગુ પડશે).',
+      true,
+    ),
+    (
+      'subject_and_class_teachers',
+      '3️⃣ વિષય શિક્ષક + વિભાગ વર્ગ શિક્ષક + વર્ગ શિક્ષક (Subject & Class Teachers — હાલની જેમ)',
+      'વર્ગ શિક્ષક, તે ધોરણના અન્ય વિભાગના વર્ગ શિક્ષક તેમજ જે-તે વર્ગમાં વિષય ભણાવતા વિષય શિક્ષક (Subject Teacher) હાજરી પૂરી શકશે. (રજા દરમિયાન ચાર્જ સંભાળનાર ઇન્ચાર્જ શિક્ષક પણ રજાના દિવસો પૂરતી હાજરી પૂરી શકશે).',
+      true,
+    ),
+    (
+      'any_teacher_all_classes',
+      '4️⃣ કોઈપણ શિક્ષક કોઈપણ વર્ગની હાજરી પૂરી શકે (Any Teacher Can Record Any Class Attendance)',
+      'શાળાના કોઈપણ સક્રિય શિક્ષક શાળાના તમામ ધોરણ અને વિભાગોની હાજરી (PM POSHAN અને અલ્પાહાર સાથે) પૂરી શકશે.',
+      false,
+    ),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMode();
+  }
+
+  Future<void> _loadMode() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final schoolRef = await _schoolRef(_client);
+      final row = await _client
+          .from('school_settings')
+          .select('config')
+          .eq('school_ref', schoolRef)
+          .maybeSingle();
+      final cfg = row?['config'] is Map
+          ? Map<String, dynamic>.from(row!['config'] as Map)
+          : <String, dynamic>{};
+      final raw = '${cfg['attendance_recording_permission_mode'] ?? ''}'
+          .trim()
+          .toLowerCase();
+      final resolved = switch (raw) {
+        'only_class_teacher' => 'only_class_teacher',
+        'section_wise_class_teachers' => 'section_wise_class_teachers',
+        'any_teacher_all_classes' => 'any_teacher_all_classes',
+        _ => 'subject_and_class_teachers',
+      };
+      if (!mounted) return;
+      setState(() {
+        _permissionMode = resolved;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _saveMode(String nextMode) async {
+    if (_saving || nextMode == _permissionMode) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final schoolRef = await _schoolRef(_client);
+      final existingRow = await _client
+          .from('school_settings')
+          .select('config')
+          .eq('school_ref', schoolRef)
+          .maybeSingle();
+      final cfg = existingRow?['config'] is Map
+          ? Map<String, dynamic>.from(existingRow!['config'] as Map)
+          : <String, dynamic>{};
+      cfg['attendance_recording_permission_mode'] = nextMode;
+      await _client.from('school_settings').upsert(<String, dynamic>{
+        'school_ref': schoolRef,
+        'config': cfg,
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      }, onConflict: 'school_ref');
+      FirestoreQueryBuilder.invalidateCache('school_settings');
+      if (!mounted) return;
+      setState(() {
+        _permissionMode = nextMode;
+        _saving = false;
+      });
+      final title = _modes
+          .firstWhere((m) => m.$1 == nextMode, orElse: () => _modes[2])
+          .$2;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ હાજરી પરવાનગી નિયમ સેવ થયો: $title'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _saving = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFFF8FAFC),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: Color(0xFF0F766E), width: 1.5),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.verified_user_rounded,
+                  color: Color(0xFF0F766E),
+                  size: 28,
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'શિક્ષક હાજરી પૂરવાની પરવાનગી (Teacher Attendance Recording Permission — Admin Control)',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 16.5,
+                    ),
+                  ),
+                ),
+                if (_saving)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  IconButton(
+                    tooltip: 'Refresh',
+                    onPressed: _loading ? null : _loadMode,
+                    icon: const Icon(Icons.refresh),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF0FDFA),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFF5EEAD4)),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '🛡️ School Admin હંમેશા શાળાના તમામ વર્ગોની હાજરી (PM POSHAN અને અલ્પાહાર સાથે) પૂરી શકે છે.',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12.5,
+                      color: Color(0xFF115E59),
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    '📅 રજા ચાર્જ નિયમ (Leave In-Charge Rule): વિકલ્પ 1, 2 અને 3 માં જ્યારે કોઈ શિક્ષક રજા પર હોય ત્યારે તેમણે રજા અરજીમાં પસંદ કરેલ "ચાર્જ શિક્ષક (In-Charge Teacher)" માત્ર રજાની શરૂઆતથી અંતિમ તારીખ (Leave Period) દરમિયાન જ તે શિક્ષકના વર્ગની હાજરી પૂરી શકશે.',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                      color: Color(0xFF0F766E),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+            const SizedBox(height: 10),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else
+              for (final item in _modes)
+                Builder(
+                  builder: (context) {
+                    final selected = _permissionMode == item.$1;
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? const Color(0xFFECFDF5)
+                            : Colors.white,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: selected
+                              ? const Color(0xFF059669)
+                              : const Color(0xFFCBD5E1),
+                          width: selected ? 1.8 : 1.1,
+                        ),
+                      ),
+                      child: RadioListTile<String>(
+                        value: item.$1,
+                        groupValue: _permissionMode,
+                        onChanged: _saving
+                            ? null
+                            : (val) {
+                                if (val != null) _saveMode(val);
+                              },
+                        title: Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              item.$2,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                fontSize: 14,
+                                color: selected
+                                    ? const Color(0xFF065F46)
+                                    : const Color(0xFF0F172A),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: item.$4
+                                    ? const Color(0xFFFEF3C7)
+                                    : const Color(0xFFDBEAFE),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                item.$4
+                                    ? '🟠 રજા ઇન્ચાર્જ નિયમ લાગુ'
+                                    : '🌐 તમામ વર્ગ ખુલ્લા',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: item.$4
+                                      ? const Color(0xFF92400E)
+                                      : const Color(0xFF1E40AF),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        subtitle: Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            item.$3,
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              height: 1.35,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                _roleColorLegendChip(
+                  bg: const Color(0xFFECFDF5),
+                  border: const Color(0xFF6EE7B7),
+                  text: const Color(0xFF065F46),
+                  label: '🟢 વર્ગ શિક્ષક (Class Teacher)',
+                ),
+                _roleColorLegendChip(
+                  bg: const Color(0xFFEFF6FF),
+                  border: const Color(0xFF93C5FD),
+                  text: const Color(0xFF1E40AF),
+                  label: '🔵 વિભાગ / વિષય શિક્ષક (Section / Subject Teacher)',
+                ),
+                _roleColorLegendChip(
+                  bg: const Color(0xFFFFFBEB),
+                  border: const Color(0xFFFCD34D),
+                  text: const Color(0xFF92400E),
+                  label: '🟠 રજા ઇન્ચાર્જ શિક્ષક (Leave In-Charge Period)',
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _roleColorLegendChip({
+    required Color bg,
+    required Color border,
+    required Color text,
+    required String label,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: border),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11.5,
+          fontWeight: FontWeight.w700,
+          color: text,
+        ),
+      ),
+    );
+  }
+}
+
 class SupabaseAttendanceFreezeManageScreen extends StatefulWidget {
   const SupabaseAttendanceFreezeManageScreen({super.key});
 
@@ -3488,6 +4162,8 @@ class _SupabaseAttendanceFreezeManageScreenState
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                const SupabaseAttendancePermissionControlCard(),
+                const SizedBox(height: 12),
                 Card(
                   color: _threeStepSaveMode
                       ? Colors.indigo.shade50
@@ -3889,6 +4565,9 @@ class _SupabaseClassPromotionScreenState
             '${DateTime.now().day.toString().padLeft(2, '0')}/${DateTime.now().month.toString().padLeft(2, '0')}/${DateTime.now().year}',
       );
   final Set<String> _secSelectedStudentIds = <String>{};
+  List<Map<String, dynamic>> _schoolTeachers = <Map<String, dynamic>>[];
+  final Map<String, String> _currentClassTeacherByClassId = <String, String>{};
+  final Map<String, String> _newClassTeacherMap = <String, String>{};
 
   @override
   void initState() {
@@ -3944,10 +4623,70 @@ class _SupabaseClassPromotionScreenState
         }
       }
 
+      // Load active school teachers & current class_teacher_id per class for New Class Teacher assignment
+      List<Map<String, dynamic>> teacherRows = <Map<String, dynamic>>[];
+      final currentCtMap = <String, String>{};
+      try {
+        final sRef = '${await _client.rpc('current_school_ref') ?? ''}'.trim();
+        if (sRef.isNotEmpty) {
+          final tRes = await _client
+              .from('school_teachers')
+              .select('id,teacher_name,role,is_active')
+              .eq('school_ref', sRef)
+              .eq('is_active', true);
+          teacherRows = tRes
+              .map((e) => Map<String, dynamic>.from(e))
+              .where((t) {
+                final r = '${t['role'] ?? 'teacher'}'.trim().toLowerCase();
+                return r != 'developer' && '${t['teacher_name'] ?? ''}'.trim().isNotEmpty;
+              })
+              .toList()
+            ..sort(
+              (a, b) => '${a['teacher_name'] ?? ''}'.toLowerCase().compareTo(
+                '${b['teacher_name'] ?? ''}'.toLowerCase(),
+              ),
+            );
+          final cRes = await _client
+              .from('school_classes')
+              .select('id,class_teacher_id')
+              .eq('school_ref', sRef)
+              .eq('is_active', true);
+          for (final cr in cRes) {
+            final cid = '${cr['id'] ?? ''}'.trim();
+            final ctid = '${cr['class_teacher_id'] ?? ''}'.trim();
+            if (cid.isNotEmpty) currentCtMap[cid] = ctid;
+          }
+        }
+      } catch (_) {}
+
+      final validTeacherIds = <String>{
+        for (final t in teacherRows) '${t['id'] ?? ''}'.trim(),
+      };
+      final nextCtMap = <String, String>{};
+      for (final cl in clsList) {
+        final cid = '${cl['class_id'] ?? ''}'.trim();
+        if (cid.isEmpty) continue;
+        final existingSel = _newClassTeacherMap[cid];
+        final curCt = currentCtMap[cid] ?? '';
+        final chosen = (existingSel != null &&
+                (existingSel.isEmpty || validTeacherIds.contains(existingSel)))
+            ? existingSel
+            : (validTeacherIds.contains(curCt) ? curCt : '');
+        nextCtMap[cid] = chosen;
+      }
+
+      if (!mounted) return;
       setState(() {
         _preview = previewMap;
         _secFromClassId = fromId;
         _secToClassId = toId;
+        _schoolTeachers = teacherRows;
+        _currentClassTeacherByClassId
+          ..clear()
+          ..addAll(currentCtMap);
+        _newClassTeacherMap
+          ..clear()
+          ..addAll(nextCtMap);
         _loading = false;
       });
     } catch (e) {
@@ -4590,6 +5329,7 @@ class _SupabaseClassPromotionScreenState
           'p_class_target_class_map': _classTargetClassMap,
           'p_new_class_enroll_date': _newClassEnrollDateController.text.trim(),
           'p_keep_same_class_teacher': _keepSameClassTeacher,
+          'p_new_class_teacher_map': _newClassTeacherMap,
         },
       );
       final map =
@@ -4606,6 +5346,9 @@ class _SupabaseClassPromotionScreenState
             '• આગળના વર્ગમાં બઢતી પામેલ વિદ્યાર્થીઓ (બાલવાટિકા → 1 અને +1): ${map['promoted_count'] ?? 0}\n'
             '• ધોરણ 8 પૂર્ણ કરી ધોરણ 9 માં જનાર (સક્રિય વર્ગમાંથી કમી): ${map['graduated_count'] ?? 0}\n'
             '• તે જ વર્ગમાં રાખેલ (Not Promoted) વિદ્યાર્થીઓ: ${map['retained_count'] ?? 0}\n\n'
+            '• અગાઉના વર્ષના તમામ હાજરી અને પરિણામ રેકોર્ડ સુરક્ષિત (Archived) રાખવામાં આવ્યા છે.\n'
+            '• નવા શૈક્ષણિક વર્ષ માટે પસંદ કરેલ વર્ગ શિક્ષકો અપડેટ થઈ ગયા છે.\n'
+            '• આ બઢતીના મહિનામાં હાજરીપત્રક (Hajari Patrak) માં જૂના વર્ગ (જૂની દાખલ તારીખ) અને નવા વર્ગ (નવી દાખલ તારીખ) બંને પ્રિન્ટ કરી શકાશે.\n\n'
             'તમામ વર્ગોમાં રોલ નંબર 1 થી સળંગ ગોઠવાઈ ગયા છે. નીચેના બટનથી બઢતી પામેલ અને ધોરણ-8 ના વિદ્યાર્થીઓની સંપૂર્ણ વિગતવાર Excel ડાઉનલોડ કરી શકો છો.',
           ),
           actions: [
@@ -4631,6 +5374,82 @@ class _SupabaseClassPromotionScreenState
     } finally {
       if (mounted) setState(() => _promoting = false);
     }
+  }
+
+  String _extractClassSectionToken(Map<String, dynamic> c) {
+    final sec = '${c['section'] ?? ''}'.trim().toUpperCase();
+    if (sec.isNotEmpty) return sec;
+    final lbl = '${c['label'] ?? c['class_key'] ?? ''}'.trim().toUpperCase();
+    final m = RegExp(r'\d+\s*[-–]?\s*([A-Z])\b').firstMatch(lbl);
+    return m?.group(1) ?? '';
+  }
+
+  void _applyKeepSameClassTeachersPreset() {
+    setState(() {
+      _keepSameClassTeacher = true;
+      for (final c in _classes) {
+        final cid = '${c['class_id'] ?? ''}'.trim();
+        if (cid.isEmpty) continue;
+        _newClassTeacherMap[cid] = _currentClassTeacherByClassId[cid] ?? '';
+      }
+    });
+  }
+
+  /// Gujarat primary/upper-primary teacher rotation preset:
+  /// - Balvatika (0) -> Std 1 -> ... -> Std 5 (teachers move up +1 with students; Std 5 teacher moves to Balvatika/Std 1)
+  /// - Std 6 -> Std 7 -> Std 8 -> Std 6 (previous Std 8 teacher becomes new Std 6 Class Teacher!)
+  void _applyGujaratTeacherRotationPreset() {
+    final byStd = <int, List<Map<String, dynamic>>>{};
+    for (final c in _classes) {
+      final std = int.tryParse('${c['standard'] ?? -1}') ?? -1;
+      if (std < 0) continue;
+      byStd.putIfAbsent(std, () => <Map<String, dynamic>>[]).add(c);
+    }
+
+    String findPrevTeacherFor(int srcStd, String targetSec) {
+      final list = byStd[srcStd];
+      if (list == null || list.isEmpty) return '';
+      if (targetSec.isNotEmpty) {
+        for (final c in list) {
+          if (_extractClassSectionToken(c) == targetSec) {
+            return _currentClassTeacherByClassId['${c['class_id'] ?? ''}'.trim()] ?? '';
+          }
+        }
+      }
+      return _currentClassTeacherByClassId['${list.first['class_id'] ?? ''}'.trim()] ?? '';
+    }
+
+    final hasBalvatika = byStd.containsKey(0);
+    setState(() {
+      _keepSameClassTeacher = false;
+      for (final c in _classes) {
+        final cid = '${c['class_id'] ?? ''}'.trim();
+        final std = int.tryParse('${c['standard'] ?? -1}') ?? -1;
+        final sec = _extractClassSectionToken(c);
+        if (cid.isEmpty || std < 0) continue;
+
+        String nextTid = _currentClassTeacherByClassId[cid] ?? '';
+        if (std == 0) {
+          // Balvatika gets previous Std 5 teacher (if exists)
+          final t = findPrevTeacherFor(5, sec);
+          if (t.isNotEmpty) nextTid = t;
+        } else if (std >= 1 && std <= 5) {
+          // Std 1..5 gets previous (std - 1) teacher (or Std 5 if std==1 and no Balvatika)
+          final srcStd = (std == 1 && !hasBalvatika) ? 5 : (std - 1);
+          final t = findPrevTeacherFor(srcStd, sec);
+          if (t.isNotEmpty) nextTid = t;
+        } else if (std == 6) {
+          // Std 6 gets previous Std 8 teacher!
+          final t = findPrevTeacherFor(8, sec);
+          if (t.isNotEmpty) nextTid = t;
+        } else if (std == 7 || std == 8) {
+          // Std 7 gets previous Std 6 teacher; Std 8 gets previous Std 7 teacher
+          final t = findPrevTeacherFor(std - 1, sec);
+          if (t.isNotEmpty) nextTid = t;
+        }
+        _newClassTeacherMap[cid] = nextTid;
+      }
+    });
   }
 
   Widget _buildPromotionTab() {
@@ -4869,6 +5688,135 @@ class _SupabaseClassPromotionScreenState
                   '• જો તેમાંથી અમુક જ વિદ્યાર્થીઓનો નવો વર્ગ બદલવો હોય, તો નીચે તે વિદ્યાર્થીની સામેના ડ્રોપડાઉનથી માત્ર તે જ વિદ્યાર્થીનો નવો વર્ગ બદલી શકાશે.\n'
                   '• જે વિદ્યાર્થીને બઢતી આપવાની નથી (નાપાસ / Retained) તેની સામે ટીક કરો — તેમની વર્ગ દાખલ તારીખ જૂની જ રહેશે.',
                 ),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEFF6FF),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFF93C5FD)),
+                  ),
+                  child: const Text(
+                    '✅ અગાઉના વર્ષના તમામ હાજરી અને પરિણામ રેકોર્ડ સુરક્ષિત (Archived) રહેશે.\n'
+                    '📅 બઢતીના મહિનામાં હાજરીપત્રક (Hajari Patrak) માં બંને પત્રક — (૧) જૂના વર્ગ અને જૂની દાખલ તારીખ મુજબ અને (૨) નવા વર્ગ અને નવી દાખલ તારીખ મુજબ — પ્રિન્ટ કરી શકાશે.',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1E3A8A),
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+                if (_schoolTeachers.isNotEmpty && _classes.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  ExpansionTile(
+                    initiallyExpanded: false,
+                    tilePadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.person_pin_rounded, color: Color(0xFF0F766E)),
+                    title: const Text(
+                      'નવા વર્ગ માટે વર્ગ શિક્ષક પસંદગી (New Class Teacher Dropdown)',
+                      style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14.5),
+                    ),
+                    subtitle: const Text(
+                      'ડિફોલ્ટ રૂપે તે જ વર્ગ શિક્ષક રહેશે. જરૂર મુજબ બાલવાટિકા–૫ સાથે જાય અને ધોરણ ૮→૬ રોટેશન અથવા કોઈપણ વર્ગના શિક્ષક બદલી શકો છો.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    children: [
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: (!canPromote || _promoting)
+                                ? null
+                                : _applyKeepSameClassTeachersPreset,
+                            icon: const Icon(Icons.lock_reset_rounded, size: 17),
+                            label: const Text('તે જ વર્ગ શિક્ષક રાખો (Default)'),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: (!canPromote || _promoting)
+                                ? null
+                                : _applyGujaratTeacherRotationPreset,
+                            icon: const Icon(Icons.sync_rounded, size: 17),
+                            label: const Text(
+                              'બાલવાટિકા → ધોરણ 5 સાથે જાય + ધોરણ 8 → 6 રોટેશન',
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      for (final cl in _classes) ...[
+                        Builder(
+                          builder: (ctx) {
+                            final cid = '${cl['class_id'] ?? ''}'.trim();
+                            final cLabel = '${cl['label'] ?? cl['class_key'] ?? cid}'.trim();
+                            final selTid = _newClassTeacherMap[cid] ?? '';
+                            final validIds = _schoolTeachers
+                                .map((t) => '${t['id'] ?? ''}'.trim())
+                                .toSet();
+                            final safeVal =
+                                (selTid.isEmpty || validIds.contains(selTid))
+                                    ? selTid
+                                    : '';
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Row(
+                                children: [
+                                  SizedBox(
+                                    width: 140,
+                                    child: Text(
+                                      cLabel,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 13.5,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: DropdownButtonFormField<String>(
+                                      value: safeVal,
+                                      isExpanded: true,
+                                      decoration: const InputDecoration(
+                                        isDense: true,
+                                        labelText: 'નવો વર્ગ શિક્ષક',
+                                        border: OutlineInputBorder(),
+                                      ),
+                                      items: <DropdownMenuItem<String>>[
+                                        const DropdownMenuItem<String>(
+                                          value: '',
+                                          child: Text('— પસંદ નથી (Unassigned) —'),
+                                        ),
+                                        for (final t in _schoolTeachers)
+                                          DropdownMenuItem<String>(
+                                            value: '${t['id'] ?? ''}'.trim(),
+                                            child: Text(
+                                              '${t['teacher_name'] ?? ''}'.trim(),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                      ],
+                                      onChanged: (!canPromote || _promoting)
+                                          ? null
+                                          : (v) {
+                                              if (v != null) {
+                                                setState(() {
+                                                  _newClassTeacherMap[cid] = v;
+                                                });
+                                              }
+                                            },
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 10),
                 TextField(
                   decoration: const InputDecoration(

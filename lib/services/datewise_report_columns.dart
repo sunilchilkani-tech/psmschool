@@ -148,7 +148,19 @@ class TarijReportColumn {
     TarijReportColumn(
       key: 'exits',
       defaultNumber: 3,
-      label: '૩. ચાલુ માસમાં કમી થયેલ (Exits / LC • કુમાર/કન્યા/કુલ)',
+      label: '૩. ચાલુ માસમાં કમી થયેલ કુલ (લિ. સર્ટી. + સતત ગેરહાજરી • કુમાર/કન્યા/કુલ)',
+      group: 'core',
+    ),
+    TarijReportColumn(
+      key: 'lc_exits',
+      defaultNumber: 21,
+      label: 'ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ (LC Exits • કુમાર/કન્યા/કુલ)',
+      group: 'core',
+    ),
+    TarijReportColumn(
+      key: 'absence_exits',
+      defaultNumber: 22,
+      label: 'સતત ગેરહાજરીથી નામ કમી કરેલ (Continuous Absence Exits • કુમાર/કન્યા/કુલ)',
       group: 'core',
     ),
     TarijReportColumn(
@@ -278,6 +290,8 @@ class TarijColumnSpec {
     'opening',
     'admissions',
     'exits',
+    'lc_exits',
+    'absence_exits',
     'present_total',
     'attendance_pct',
     'mdm_total',
@@ -299,6 +313,8 @@ class TarijColumnSpec {
     'opening': 'શરૂઆતની સંખ્યા',
     'admissions': 'નવા દાખલ',
     'exits': 'શાળા છોડી / કમી',
+    'lc_exits': 'ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ',
+    'absence_exits': 'સતત ગેરહાજરીથી નામ કમી કરેલ',
     'closing': 'અંતે રજી.',
     'working_days': 'માસના ચાલુ દિવસો',
     'present_total': 'કુલ હાજર',

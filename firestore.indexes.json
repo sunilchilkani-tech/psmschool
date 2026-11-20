@@ -9,6 +9,15 @@
       ]
     },
     {
+      "collectionGroup": "attendance_days",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "school_ref", "order": "ASCENDING" },
+        { "fieldPath": "class_id", "order": "ASCENDING" },
+        { "fieldPath": "attendance_date", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "students",
       "queryScope": "COLLECTION",
       "fields": [

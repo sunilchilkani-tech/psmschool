@@ -18,12 +18,20 @@ import 'supabase_file_share_screen.dart';
 import 'supabase_teacher_leave_screen.dart';
 import 'supabase_admin_center_screen.dart';
 import 'supabase_hajari_patrak_screen.dart';
+import 'supabase_library_screen.dart';
 import 'supabase_id_card_studio_screen.dart';
 import 'fln_workbook_screen.dart';
 import 'print_merge_studio_screen.dart';
 import 'supabase_rojmel_screen.dart';
+import 'supabase_academic_calendar_screen.dart';
+import 'supabase_low_attendance_alerts_screen.dart';
+import 'supabase_textbook_issue_register_screen.dart';
+import 'supabase_weekly_meal_menu_screen.dart';
+import 'supabase_whole_school_result_summary_screen.dart';
 import '../widgets/supabase_birthday_reminder_on_login.dart';
 import '../widgets/global_student_search_card.dart';
+import '../widgets/admin_daily_attendance_dashboard.dart';
+import '../widgets/school_action_center_card.dart';
 import '../widgets/school_name_language_selector.dart';
 import '../theme/display_scale.dart';
 import '../services/school_type.dart';
@@ -56,7 +64,21 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
   /// Selected main tab on the home screen ('all' shows every section).
   String _homeGroup = 'all';
   String _homeSearch = '';
+  bool _devPreviewOnlyAllowedModules = false;
   final TextEditingController _homeSearchCtrl = TextEditingController();
+
+  bool get _isDeveloperSession =>
+      profile['is_developer_session'] == true ||
+      Supabase.instance.client.isDeveloperImpersonatingSchool;
+
+  bool _isModuleEnabled(String moduleKey) {
+    return SchoolModuleRegistry.isModuleEnabled(
+      moduleKey,
+      schoolContext: _schoolContext,
+      profile: profile,
+      developerShowAll: _isDeveloperSession && !_devPreviewOnlyAllowedModules,
+    );
+  }
 
   @override
   void dispose() {
@@ -83,6 +105,10 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         final popup = popups[i];
         final kind = '${popup['kind'] ?? ''}';
         final isValidity = kind == 'validity_reminder';
+        final isAdminPendingLeave = kind == 'admin_pending_leaves';
+        final isTeacherLeaveDecision = kind == 'teacher_leave_decision';
+        final decisionStatus = '${popup['status'] ?? ''}'.toLowerCase();
+        var openAdminLeaveApproval = false;
         await showDialog<void>(
           context: context,
           barrierDismissible: false,
@@ -92,19 +118,33 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
                 Icon(
                   isValidity
                       ? Icons.warning_amber_rounded
-                      : Icons.campaign_outlined,
-                  color: isValidity ? Colors.orange.shade800 : null,
+                      : isAdminPendingLeave
+                          ? Icons.notification_important_rounded
+                          : isTeacherLeaveDecision
+                              ? (decisionStatus == 'approved'
+                                  ? Icons.check_circle_rounded
+                                  : Icons.cancel_rounded)
+                              : Icons.campaign_outlined,
+                  color: isValidity
+                      ? Colors.orange.shade800
+                      : isAdminPendingLeave
+                          ? Colors.deepOrange.shade700
+                          : isTeacherLeaveDecision
+                              ? (decisionStatus == 'approved'
+                                  ? Colors.green.shade700
+                                  : Colors.red.shade700)
+                              : null,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    '${popup['title'] ?? (isValidity ? 'School Validity Reminder' : 'Developer Message')}',
+                    '${popup['title'] ?? (isValidity ? 'School Validity Reminder' : 'Notification')}',
                   ),
                 ),
               ],
             ),
             content: SizedBox(
-              width: 460,
+              width: 480,
               child: SingleChildScrollView(
                 child: SelectableText(
                   '${popup['message'] ?? ''}',
@@ -113,6 +153,15 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
               ),
             ),
             actions: [
+              if (isAdminPendingLeave)
+                OutlinedButton.icon(
+                  onPressed: () {
+                    openAdminLeaveApproval = true;
+                    Navigator.of(dialogContext).pop();
+                  },
+                  icon: const Icon(Icons.fact_check_outlined, size: 18),
+                  label: const Text('રજા મંજૂર / નામંજૂર કરો'),
+                ),
               FilledButton(
                 onPressed: () => Navigator.of(dialogContext).pop(),
                 child: Text(
@@ -126,6 +175,14 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         try {
           await service.dismissDuePopup(popup);
         } catch (_) {}
+        if (openAdminLeaveApproval && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => SupabaseAdminCenterScreen(profile: profile),
+            ),
+          );
+          break;
+        }
       }
     } catch (_) {}
   }
@@ -138,16 +195,19 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
     final schoolContext =
         await SchoolNameLanguageService.loadCurrentSchoolContext(client);
     if (!mounted) return;
+    final role = '${profile['role'] ?? 'teacher'}'.trim().toLowerCase();
     List<Map<String, dynamic>> sharedFiles = <Map<String, dynamic>>[];
-    try {
-      final res = await client.rpc('psm_get_developer_shared_files');
-      if (res is List) {
-        sharedFiles = res
-            .whereType<Map>()
-            .map((e) => e.map((k, v) => MapEntry(k.toString(), v)))
-            .toList();
-      }
-    } catch (_) {}
+    if (role == 'admin') {
+      try {
+        final res = await client.rpc('psm_get_developer_shared_files');
+        if (res is List) {
+          sharedFiles = res
+              .whereType<Map>()
+              .map((e) => e.map((k, v) => MapEntry(k.toString(), v)))
+              .toList();
+        }
+      } catch (_) {}
+    }
     if (!mounted) return;
     setState(() {
       _schoolRef = schoolRef;
@@ -155,7 +215,6 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
       _schoolContext = schoolContext;
       _devSharedFiles = sharedFiles;
     });
-    final role = '${profile['role'] ?? 'teacher'}'.trim().toLowerCase();
     if (role == 'admin' && sharedFiles.isNotEmpty) {
       await _checkAndShowDeveloperSharedFilesPopup(
         schoolRef: schoolRef,
@@ -346,9 +405,16 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         profile['is_blocked'] == true || profile['can_edit'] == false;
 
     void openAttendanceTab(int index) {
+      final effectiveProfile = <String, dynamic>{
+        ...profile,
+        if (_schoolContext.containsKey('disabled_modules'))
+          'disabled_modules': _schoolContext['disabled_modules'],
+        'developer_show_all_modules':
+            _isDeveloperSession && !_devPreviewOnlyAllowedModules,
+      };
       Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => SupabaseAttendanceWorkspaceScreen(
-          profile: profile,
+          profile: effectiveProfile,
           readOnly: isBlocked,
           initialIndex: index,
         ),
@@ -376,31 +442,110 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         title: Text(schoolName, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           DisplayScale.menuButton(color: Colors.white),
-          IconButton(
-              tooltip: 'Global Student Search / વિદ્યાર્થી સર્ચ',
-              onPressed: () => showGlobalStudentSearchDialog(
-                    context,
-                    readOnly: isBlocked,
-                  ),
-              icon: const Icon(Icons.person_search_rounded)),
-          IconButton(
-              tooltip: 'FileBeam Pro — Direct File & Text Share',
-              onPressed: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) =>
-                          SupabaseFileShareScreen(profile: profile),
+          if (_isModuleEnabled('student_search'))
+            IconButton(
+                tooltip: 'Global Student Search / વિદ્યાર્થી સર્ચ',
+                onPressed: () => showGlobalStudentSearchDialog(
+                      context,
+                      readOnly: isBlocked,
                     ),
-                  ),
-              icon: const Icon(Icons.bolt_rounded)),
+                icon: const Icon(Icons.person_search_rounded)),
+          if (_isModuleEnabled('file_beam'))
+            IconButton(
+                tooltip: 'FileBeam Pro — Direct File & Text Share',
+                onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            SupabaseFileShareScreen(profile: profile),
+                      ),
+                    ),
+                icon: const Icon(Icons.bolt_rounded)),
           IconButton(
-              tooltip: 'Log out',
+              tooltip: _isDeveloperSession ? 'Exit to Developer Panel' : 'Log out',
               onPressed: onLogout,
-              icon: const Icon(Icons.logout)),
+              icon: Icon(_isDeveloperSession ? Icons.exit_to_app_rounded : Icons.logout)),
         ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          if (_isDeveloperSession) ...[
+            Card(
+              color: const Color(0xFFFEF3C7),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+                side: const BorderSide(color: Color(0xFFD97706), width: 1.4),
+              ),
+              margin: const EdgeInsets.only(bottom: 12),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.developer_mode_rounded, color: Color(0xFFB45309)),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Developer Operating School Admin: $schoolName (UDISE: $schoolId)',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF78350F),
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        FilledButton.icon(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF0F172A),
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => SupabaseAdminCenterScreen(profile: profile),
+                            ),
+                          ),
+                          icon: const Icon(Icons.dashboard_customize_rounded, size: 18),
+                          label: const Text('Open Admin Centre (શાળા સંચાલન)'),
+                        ),
+                        FilledButton.tonalIcon(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const AdminWorkflowPanel(),
+                            ),
+                          ),
+                          icon: const Icon(Icons.manage_accounts_rounded, size: 18),
+                          label: const Text('Classes & Teachers (વર્ગ અને શિક્ષક)'),
+                        ),
+                        FilterChip(
+                          selected: _devPreviewOnlyAllowedModules,
+                          label: Text(
+                            _devPreviewOnlyAllowedModules
+                                ? 'Previewing School Allowed Modules Only'
+                                : 'Showing All Modules (Developer Mode)',
+                          ),
+                          onSelected: (v) => setState(() => _devPreviewOnlyAllowedModules = v),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: onLogout,
+                          icon: const Icon(Icons.arrow_back_rounded, size: 18),
+                          label: const Text('Back to Developer Panel'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           Container(
             decoration: BoxDecoration(
               gradient: const LinearGradient(
@@ -513,11 +658,14 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
           ),
           const SizedBox(height: 8),
           const _TodaySchoolMessageBanner(),
-          if (role == 'teacher') const SupabaseBirthdayReminderOnLogin(),
+          if (_isModuleEnabled('academic_calendar'))
+            UpcomingAcademicEventsBanner(profile: profile),
           if (role != 'developer')
-            GlobalStudentSearchCard(
+            SchoolActionCenterCard(
+              profile: profile,
               readOnly: isBlocked,
             ),
+          if (role == 'teacher') const SupabaseBirthdayReminderOnLogin(),
           ..._buildModuleSections(
             context,
             role: role,
@@ -526,6 +674,16 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
             openAttendanceTab: openAttendanceTab,
             openCertificate: openCertificatePlaceholder,
           ),
+          if (isAdmin &&
+              !isBlocked &&
+              _isModuleEnabled('daily_dashboard') &&
+              _isModuleEnabled('attendance')) ...[
+            const SizedBox(height: 18),
+            AdminDailyAttendanceDashboard(
+              profile: profile,
+              initiallyExpanded: true,
+            ),
+          ],
           if (isBlocked)
             const Padding(
               padding: EdgeInsets.all(12),
@@ -557,9 +715,10 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
     void push(Widget screen) => Navigator.of(context)
         .push(MaterialPageRoute<void>(builder: (_) => screen));
 
-    final modules = <_HomeModule>[
+    final allCandidateModules = <_HomeModule>[
       // ---------------- Daily work ----------------
       _HomeModule(
+        moduleKey: 'attendance',
         group: 'daily',
         icon: Icons.fact_check_rounded,
         color: const Color(0xFF0F766E),
@@ -570,6 +729,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         onTap: () => openAttendanceTab(0),
       ),
       _HomeModule(
+        moduleKey: 'reports',
         group: 'daily',
         icon: Icons.insert_chart_rounded,
         color: const Color(0xFF1D4ED8),
@@ -581,6 +741,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
       // Moved out of Reports into its own tab: blank register for every
       // teacher, recorded register (admin only) inside the screen.
       _HomeModule(
+        moduleKey: 'hajari_patrak',
         group: 'daily',
         icon: Icons.grid_on_rounded,
         color: const Color(0xFF7C3AED),
@@ -592,6 +753,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
             SupabaseHajariPatrakScreen(profile: profile, readOnly: isBlocked)),
       ),
       _HomeModule(
+        moduleKey: 'parent_message',
         group: 'daily',
         icon: Icons.mark_email_read_rounded,
         color: const Color(0xFF0891B2),
@@ -600,6 +762,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         onTap: () => openAttendanceTab(5),
       ),
       _HomeModule(
+        moduleKey: 'most_present',
         group: 'daily',
         icon: Icons.emoji_events_rounded,
         color: const Color(0xFFD97706),
@@ -608,6 +771,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         onTap: () => openAttendanceTab(3),
       ),
       _HomeModule(
+        moduleKey: 'leave',
         group: 'daily',
         icon: Icons.event_available_rounded,
         color: const Color(0xFFDB2777),
@@ -618,9 +782,30 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         onTap: () => push(
             SupabaseTeacherLeaveScreen(profile: profile, readOnly: isBlocked)),
       ),
+      _HomeModule(
+        moduleKey: 'low_attendance_alerts',
+        group: 'daily',
+        icon: Icons.notification_important_rounded,
+        color: const Color(0xFFDC2626),
+        title: 'સતત ગેરહાજર / ઓછી હાજરી યાદી',
+        subtitle:
+            '૩+ સતત ગેરહાજર, ૭૫% થી ઓછી હાજરી, ૧-ક્લિક વાલી WhatsApp અને Admin Excel ડાઉનલોડ.',
+        onTap: () => push(SupabaseLowAttendanceAlertsScreen(profile: profile)),
+      ),
+      _HomeModule(
+        moduleKey: 'pm_poshan_menu',
+        group: 'daily',
+        icon: Icons.restaurant_menu_rounded,
+        color: const Color(0xFF059669),
+        title: 'PM POSHAN અને અલ્પાહાર મેનુ',
+        subtitle:
+            'આજનું અને આખા અઠવાડિયાનું વાનગી તથા સામગ્રી-જથ્થા સાથેનું મેનુ જુઓ/સેટ કરો.',
+        onTap: () => push(SupabaseWeeklyMealMenuScreen(profile: profile)),
+      ),
       // ---------------- Students & results ----------------
       if (role != 'developer')
         _HomeModule(
+          moduleKey: 'student_search',
           group: 'students',
           icon: Icons.person_search_rounded,
           color: const Color(0xFF1D4ED8),
@@ -635,6 +820,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       if (!isBlocked)
         _HomeModule(
+          moduleKey: 'student_management',
           group: 'students',
           icon: Icons.groups_rounded,
           color: const Color(0xFF059669),
@@ -644,6 +830,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       if (!isBlocked && role != 'developer')
         _HomeModule(
+          moduleKey: 'result',
           group: 'students',
           icon: Icons.assessment_rounded,
           color: const Color(0xFF4F46E5),
@@ -651,7 +838,18 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
           subtitle: 'Semester registers, marks entry, result and front pages.',
           onTap: _openResultModule,
         ),
+      if (isAdmin && !isBlocked)
+        _HomeModule(
+          moduleKey: 'result_summary',
+          group: 'admin',
+          icon: Icons.analytics_rounded,
+          color: const Color(0xFF0B2D5B),
+          title: 'સમગ્ર શાળાનું પરિણામ સારાંશ (All 3 Formats)',
+          subtitle: 'Admin-only semester-wise result summary (Class-Section, Category-Grade & Whole School) in 1 click with logo.',
+          onTap: () => push(SupabaseWholeSchoolResultSummaryScreen(profile: profile)),
+        ),
       _HomeModule(
+        moduleKey: 'bonafide',
         group: 'students',
         icon: Icons.verified_rounded,
         color: const Color(0xFF0D9488),
@@ -663,6 +861,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       ),
       _HomeModule(
+        moduleKey: 'leaving_certificate',
         group: 'students',
         icon: Icons.history_edu_rounded,
         color: const Color(0xFFB45309),
@@ -675,6 +874,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
       ),
       if (isAdmin && !isBlocked)
         _HomeModule(
+          moduleKey: 'id_card',
           group: 'students',
           icon: Icons.badge_rounded,
           color: const Color(0xFF2563EB),
@@ -684,6 +884,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       if (role != 'developer')
         _HomeModule(
+          moduleKey: 'fln_workbook',
           group: 'students',
           icon: Icons.calculate_rounded,
           color: const Color(0xFF0E7490),
@@ -691,9 +892,30 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
           subtitle: 'Class-wise FLN maths papers (PDF) with answer keys and A4 page setup.',
           onTap: () => push(FlnWorkbookScreen(profile: profile)),
         ),
+      if (role != 'developer')
+        _HomeModule(
+          moduleKey: 'textbook_issue_register',
+          group: 'students',
+          icon: Icons.menu_book_rounded,
+          color: const Color(0xFF0F766E),
+          title: 'પાઠ્યપુસ્તક વિતરણ રજીસ્ટર / Textbook Issue',
+          subtitle: 'વિદ્યાર્થી Snapshot તારીખ અને વધારાની ખાલી હરોળ સાથે વાલી/વિદ્યાર્થી સહી પહોંચ પ્રિન્ટ.',
+          onTap: () => push(SupabaseTextbookIssueRegisterScreen(profile: profile)),
+        ),
       // ---------------- Administration ----------------
       if (isAdmin && !isBlocked)
         _HomeModule(
+          moduleKey: 'daily_dashboard',
+          group: 'admin',
+          icon: Icons.notifications_active_rounded,
+          color: const Color(0xFF15803D),
+          title: 'દૈનિક હાજરી ડેશબોર્ડ અને WhatsApp રીમાઈન્ડર',
+          subtitle: 'રિપોર્ટ વગર લાઈવ દૈનિક અહેવાલ, બાકી વર્ગો અને ૧-ક્લિક WhatsApp રીમાઈન્ડર.',
+          onTap: () => push(SupabaseAdminDailyDashboardScreen(profile: profile)),
+        ),
+      if (isAdmin && !isBlocked)
+        _HomeModule(
+          moduleKey: 'rojmel',
           group: 'admin',
           icon: Icons.account_balance_wallet_rounded,
           color: const Color(0xFF123A6B),
@@ -703,6 +925,18 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       if (isAdmin && !isBlocked)
         _HomeModule(
+          moduleKey: 'attendance_permission',
+          group: 'admin',
+          icon: Icons.verified_user_rounded,
+          color: const Color(0xFF0F766E),
+          title: 'Teacher Attendance Permission / હાજરી પૂરવાની પરવાનગી (4 Modes)',
+          subtitle:
+              'નક્કી કરો કે કયા શિક્ષક હાજરી પૂરી શકે: (1) માત્ર વર્ગ શિક્ષક, (2) વિભાગવાર વર્ગ શિક્ષક (6A, 6B, 6C...), (3) વિષય શિક્ષક, કે (4) કોઈપણ શિક્ષક (+ રજા ચાર્જ).',
+          onTap: () => push(const SupabaseAttendancePermissionScreen()),
+        ),
+      if (isAdmin && !isBlocked)
+        _HomeModule(
+          moduleKey: 'admin_panel',
           group: 'admin',
           icon: Icons.dashboard_customize_rounded,
           color: const Color(0xFF0F172A),
@@ -712,6 +946,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       if (isAdmin && !isBlocked)
         _HomeModule(
+          moduleKey: 'classes_teachers',
           group: 'admin',
           icon: Icons.manage_accounts_rounded,
           color: const Color(0xFF475569),
@@ -721,6 +956,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       if (isAdmin && !isBlocked)
         _HomeModule(
+          moduleKey: 'timetable',
           group: 'admin',
           icon: Icons.calendar_month_rounded,
           color: const Color(0xFF9333EA),
@@ -731,6 +967,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
         ),
       if (isAdmin && !isBlocked)
         _HomeModule(
+          moduleKey: 'exam_planner',
           group: 'admin',
           icon: Icons.assignment_turned_in_rounded,
           color: const Color(0xFFBE185D),
@@ -739,17 +976,31 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
           onTap: () => push(
               AdminPlanningStudioScreen(profile: profile, initialTab: 1)),
         ),
+      _HomeModule(
+        moduleKey: 'academic_calendar',
+        group: 'admin',
+        icon: Icons.calendar_today_rounded,
+        color: const Color(0xFF3730A3),
+        title: 'શૈક્ષણિક કેલેન્ડર / Academic Calendar',
+        subtitle:
+            'પરીક્ષા તારીખ, PTM, SMC સભા અને સરકારી ડેડલાઈન રીમાઈન્ડર.',
+        onTap: () => push(SupabaseAcademicCalendarScreen(profile: profile)),
+      ),
+
       // ---------------- Tools ----------------
       _HomeModule(
-        group: 'tools',
+        moduleKey: 'library',
+        group: 'daily',
         icon: Icons.local_library_rounded,
         color: const Color(0xFF65A30D),
-        title: 'Library / પુસ્તકાલય',
+        title: 'Library Register / પુસ્તકાલય રજીસ્ટર',
         subtitle: 'Book issue / return, registration and Excel reports.',
-        onTap: () => openAttendanceTab(4),
+        onTap: () => push(
+            SupabaseLibraryScreen(profile: profile, readOnly: isBlocked)),
       ),
       if (role != 'developer')
         _HomeModule(
+          moduleKey: 'print_merge',
           group: 'tools',
           icon: Icons.auto_awesome_mosaic_rounded,
           color: const Color(0xFF4338CA),
@@ -758,6 +1009,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
           onTap: () => push(const PrintMergeStudioScreen()),
         ),
       _HomeModule(
+        moduleKey: 'file_beam',
         group: 'tools',
         icon: Icons.bolt_rounded,
         color: const Color(0xFFEA580C),
@@ -767,6 +1019,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
       ),
       if (isAdmin && _devSharedFiles.isNotEmpty)
         _HomeModule(
+          moduleKey: 'developer_files',
           group: 'tools',
           icon: Icons.cloud_download_rounded,
           color: const Color(0xFF0369A1),
@@ -780,6 +1033,9 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
           },
         ),
     ];
+    final modules = allCandidateModules
+        .where((m) => _isModuleEnabled(m.moduleKey))
+        .toList();
 
     final q = _homeSearch.trim().toLowerCase();
     final visible = modules.where((m) {
@@ -895,6 +1151,7 @@ class _SupabaseSignedInHomeState extends State<SupabaseSignedInHome> {
 
 class _HomeModule {
   const _HomeModule({
+    this.moduleKey = '',
     required this.group,
     required this.icon,
     required this.color,
@@ -903,6 +1160,7 @@ class _HomeModule {
     required this.onTap,
   });
 
+  final String moduleKey;
   final String group;
   final IconData icon;
   final Color color;

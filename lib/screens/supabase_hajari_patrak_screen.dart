@@ -60,6 +60,8 @@ class _SupabaseHajariPatrakScreenState
   int _blankRows = 4;
   String? _blankRowsError;
   String _printMode = 'color';
+  /// 'new' = New Class & New Enroll Date (default), 'old' = Old Class & Old Enroll Date (for promotion month dual print)
+  String _promotionPeriod = 'new';
   Timer? _settingsSaveTimer;
 
   String _text(dynamic value) => (value ?? '').toString().trim();
@@ -698,7 +700,10 @@ class _SupabaseHajariPatrakScreenState
     });
     try {
       final monthData = await _service.getMonthData(
-          classId: _classId!, year: _year, month: _month);
+          classId: _classId!,
+          year: _year,
+          month: _month,
+          promotionPeriod: _promotionPeriod);
       final teacher =
           _teachers.firstWhere((row) => _text(row['id']) == _selectedTeacherId);
       final students =
@@ -793,7 +798,10 @@ class _SupabaseHajariPatrakScreenState
       // Build the same workbook as the Excel export, then print its cover and
       // register pages (browser print, or PDF through Google Apps Script).
       final monthData = await _service.getMonthData(
-          classId: _classId!, year: _year, month: _month);
+          classId: _classId!,
+          year: _year,
+          month: _month,
+          promotionPeriod: _promotionPeriod);
       final teacher =
           _teachers.firstWhere((row) => _text(row['id']) == _selectedTeacherId);
       final students =
@@ -874,6 +882,7 @@ class _SupabaseHajariPatrakScreenState
         classId: _classId!,
         year: _year,
         month: _month,
+        promotionPeriod: _promotionPeriod,
       );
       final teacher = _teachers.firstWhere(
         (row) => _text(row['id']) == _selectedTeacherId,
@@ -1063,9 +1072,18 @@ class _SupabaseHajariPatrakScreenState
         classId: _classId!,
         year: _year,
         month: _month,
+        promotionPeriod: _promotionPeriod,
       );
-      final students =
+      final baseStudents =
           (monthData['students'] as List).cast<Map<String, dynamic>>();
+      final midMonthJoiners = (monthData['mid_month_joiners'] is List)
+          ? (monthData['mid_month_joiners'] as List).cast<Map<String, dynamic>>()
+          : const <Map<String, dynamic>>[];
+      final holidaysSet = (monthData['holidays'] is Set)
+          ? (monthData['holidays'] as Set).map((e) => '$e').toSet()
+          : (monthData['holidays'] is Iterable)
+              ? (monthData['holidays'] as Iterable).map((e) => '$e').toSet()
+              : <String>{};
       final rawMarks = monthData['student_daily_marks'] is Map
           ? Map<String, dynamic>.from(monthData['student_daily_marks'] as Map)
           : <String, dynamic>{};
@@ -1077,6 +1095,12 @@ class _SupabaseHajariPatrakScreenState
           if ((d is num ? d.toInt() : int.tryParse('$d') ?? 0) > 0)
             (d is num ? d.toInt() : int.tryParse('$d') ?? 0),
       };
+      final baseIds = baseStudents.map((s) => _text(s['id'])).toSet();
+      final students = <Map<String, dynamic>>[
+        ...baseStudents,
+        for (final j in midMonthJoiners)
+          if (!baseIds.contains(_text(j['id']))) j,
+      ];
       final lastDay = DateTime(_year, _month + 1, 0).day;
 
       final wb = ec.Excel.createExcel();
@@ -1166,6 +1190,15 @@ class _SupabaseHajariPatrakScreenState
         var mdmCount = 0;
         var bfCount = 0;
         for (var d = 1; d <= lastDay; d++) {
+          final dt = DateTime(_year, _month, d);
+          final isoDate =
+              '${_year.toString().padLeft(4, '0')}-${_month.toString().padLeft(2, '0')}-${d.toString().padLeft(2, '0')}';
+          if (dt.weekday == DateTime.sunday || holidaysSet.contains(isoDate)) {
+            final label = dt.weekday == DateTime.sunday ? 'SUN' : 'HOL';
+            setCell(s1, rowIdx, 4 + d, label, fontColorHex: '#6B7280');
+            setCell(s2, rowIdx, 4 + d, label, fontColorHex: '#6B7280');
+            continue;
+          }
           final dmRaw = stMarks['$d'];
           Map<String, dynamic>? dm;
           if (dmRaw is Map) {
@@ -1488,6 +1521,51 @@ class _SupabaseHajariPatrakScreenState
                   const SizedBox(height: 8),
                   const Text(
                       'ખાલી લાઇનની કોઈપણ પૂર્ણ સંખ્યા આ વર્ગ માટે save થશે. PDFમાં પસંદ કરેલી row height અને font size લાગુ પડશે; દિવસના ન હોતા columns છુપાશે અને મહિના અંતે હાથથી ભરવાના fields ખાલી રહેશે. Excel export મૂળ template મુજબ રહેશે.'),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF0FDF4),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFF86EFAC)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '📅 બઢતીના મહિના માટે હાજરીપત્રક વિકલ્પ (Promotion Month Dual Register):',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 12.5,
+                            color: Color(0xFF166534),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          children: [
+                            ChoiceChip(
+                              selected: _promotionPeriod == 'new',
+                              label: const Text(
+                                'નવો વર્ગ અને નવી દાખલ તારીખ (New Class — Default)',
+                              ),
+                              onSelected: (_) =>
+                                  setState(() => _promotionPeriod = 'new'),
+                            ),
+                            ChoiceChip(
+                              selected: _promotionPeriod == 'old',
+                              label: const Text(
+                                'જૂનો વર્ગ અને જૂની દાખલ તારીખ (Old Class — બઢતી પહેલાં)',
+                              ),
+                              onSelected: (_) =>
+                                  setState(() => _promotionPeriod = 'old'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
                   const SizedBox(height: 12),
                   Wrap(spacing: 8, runSpacing: 8, children: <Widget>[
                     FilledButton.icon(

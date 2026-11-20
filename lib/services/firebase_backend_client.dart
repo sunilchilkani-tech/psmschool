@@ -212,6 +212,24 @@ class FirestoreAuthClient {
   }
 
   User? get currentUser {
+    final imp = _parent._developerImpersonatedContext;
+    if (imp != null) {
+      return User(
+        id: imp.authUserId,
+        email: 'developer@${imp.schoolRef}.psmschool.local',
+        appMetadata: <String, dynamic>{
+          'psm_school_id': '${imp.schoolRow['school_id'] ?? ''}',
+          'psm_teacher_id': imp.teacherId,
+          'psm_school_ref': imp.schoolRef,
+          'psm_role': imp.role,
+          'psm_developer_impersonation': true,
+        },
+        userMetadata: <String, dynamic>{
+          'display_name': imp.teacherName,
+          'email': 'developer@${imp.schoolRef}.psmschool.local',
+        },
+      );
+    }
     final fbUser = _fbAuth.currentUser;
     if (fbUser == null) return null;
     return User(
@@ -235,6 +253,7 @@ class FirestoreAuthClient {
   }
 
   bool get hasRecentPasswordAuth {
+    if (_parent._developerImpersonatedContext != null) return true;
     final last = _lastPasswordAuthAt;
     if (last == null) {
       final authTime = _fbAuth.currentUser?.metadata.lastSignInTime;
@@ -647,50 +666,70 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
     final col = _client._db.collection(_table);
     List<Map<String, dynamic>> docs = <Map<String, dynamic>>[];
 
-    // Check if we can fetch directly by document ID (with in-memory cache!)
-    final directDocId = _tryResolveDirectDocId(eqMap);
-    if (directDocId != null) {
-      final docCacheKey = '$_table|__doc__=$directDocId';
-      final now = DateTime.now();
-      final cachedDoc = _queryCache[docCacheKey];
-      final ttlSec = _cacheTtlSecondsForTable(_table);
-      if (cachedDoc != null && now.difference(cachedDoc.ts).inSeconds < ttlSec) {
-        docs = cachedDoc.rows.map((r) => Map<String, dynamic>.from(r)).toList();
-      } else {
-        final gen = _generationOf(_table);
-        var pending = _inFlightReads[docCacheKey];
-        if (pending == null) {
-          pending = col.doc(directDocId).get().then((snap) {
-            if (!snap.exists || snap.data() == null) {
-              return <Map<String, dynamic>>[];
-            }
-            final row = Map<String, dynamic>.from(snap.data()!);
-            row['id'] ??= snap.id;
-            _applyTableSqlDefaults(_table, row);
-            return <Map<String, dynamic>>[row];
-          });
-          _inFlightReads[docCacheKey] = pending;
-          pending.whenComplete(() {
-            if (identical(_inFlightReads[docCacheKey], pending)) {
-              _inFlightReads.remove(docCacheKey);
-            }
-          }).ignore();
-        }
-        final fetched = await pending;
-        if (fetched.isNotEmpty) {
-          docs = fetched.map((r) => Map<String, dynamic>.from(r)).toList();
-          if (gen == _generationOf(_table)) {
-            _queryCache[docCacheKey] = (
-              ts: now,
-              rows: <Map<String, dynamic>>[Map<String, dynamic>.from(fetched.first)],
-            );
-          }
-        } else {
-          docs = await _runCollectionQuery(col, eqMap);
-        }
-      }
+    // Optimization #1: Resolve student_attendance from embedded student_marks on attendance_days
+    if (_table == 'student_attendance') {
+      docs = await _resolveStudentAttendanceFromDaysOrLegacy(col, eqMap);
     } else {
-      docs = await _runCollectionQuery(col, eqMap);
+      // Check if we can fetch directly by document ID (with in-memory cache!)
+      final directDocId = _tryResolveDirectDocId(eqMap);
+      if (directDocId != null) {
+        final docCacheKey = '$_table|__doc__=$directDocId';
+        final now = DateTime.now();
+        final cachedDoc = _queryCache[docCacheKey];
+        final ttlSec = _cacheTtlSecondsForTable(_table);
+        final schoolRefFilter = '${eqMap['school_ref'] ?? ''}'.trim();
+        final schoolWideCached = schoolRefFilter.isNotEmpty
+            ? _queryCache['$_table|school_ref=$schoolRefFilter|in=']
+            : null;
+        if (cachedDoc != null &&
+            now.difference(cachedDoc.ts).inSeconds < ttlSec) {
+          docs = cachedDoc.rows
+              .map((r) => Map<String, dynamic>.from(r))
+              .toList();
+        } else if (schoolWideCached != null &&
+            now.difference(schoolWideCached.ts).inSeconds < ttlSec) {
+          docs = schoolWideCached.rows
+              .where((r) => '${r['id'] ?? ''}' == directDocId)
+              .map((r) => Map<String, dynamic>.from(r))
+              .toList();
+        } else {
+          final gen = _generationOf(_table);
+          var pending = _inFlightReads[docCacheKey];
+          if (pending == null) {
+            pending = col.doc(directDocId).get().then((snap) {
+              if (!snap.exists || snap.data() == null) {
+                return <Map<String, dynamic>>[];
+              }
+              final row = Map<String, dynamic>.from(snap.data()!);
+              row['id'] ??= snap.id;
+              _applyTableSqlDefaults(_table, row);
+              return <Map<String, dynamic>>[row];
+            });
+            _inFlightReads[docCacheKey] = pending;
+            pending.whenComplete(() {
+              if (identical(_inFlightReads[docCacheKey], pending)) {
+                _inFlightReads.remove(docCacheKey);
+              }
+            }).ignore();
+          }
+          final fetched = await pending;
+          if (fetched.isNotEmpty) {
+            docs = fetched.map((r) => Map<String, dynamic>.from(r)).toList();
+            if (gen == _generationOf(_table)) {
+              _queryCache[docCacheKey] = (
+                ts: now,
+                rows: <Map<String, dynamic>>[
+                  Map<String, dynamic>.from(fetched.first),
+                ],
+              );
+            }
+          } else {
+            docs = await _runCollectionQuery(col, eqMap);
+          }
+        }
+      } else {
+        docs = await _runCollectionQuery(col, eqMap);
+      }
     }
 
     // Special reassembly for chunked Rojmel state and pre-caching of school logo
@@ -757,6 +796,29 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
           } catch (_) {}
         }
       }
+    }
+
+    if (_table == 'school_admin_messages' && docs.isNotEmpty) {
+      final todayIso = SupabaseClient._indiaTodayIso();
+      final keepDocs = <Map<String, dynamic>>[];
+      for (final d in docs) {
+        final rawDate = '${d['message_date'] ?? ''}'.trim();
+        final normDate = SupabaseClient._parseAnyDateToIso(rawDate) ?? rawDate;
+        if (normDate.length >= 10 &&
+            normDate.substring(0, 10).compareTo(todayIso) < 0) {
+          final docId = '${d['id'] ?? ''}'.trim();
+          if (docId.isNotEmpty) {
+            _client._db
+                .collection('school_admin_messages')
+                .doc(docId)
+                .delete()
+                .ignore();
+          }
+          continue;
+        }
+        keepDocs.add(d);
+      }
+      docs = keepDocs;
     }
 
     // Apply all equality, inFilter, gte, lte, and RLS filters in memory
@@ -861,7 +923,145 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
     'class_result_settings',
     'school_holidays',
     'students',
+    'attendance_days',
+    'student_attendance',
+    'student_subject_marks',
+    'student_result_profiles',
+    'student_result_roster_snapshots',
+    'student_result_roster_members',
+    'teacher_leaves',
+    'library_books',
+    'library_book_number_history',
+    'library_transactions',
+    'student_private_details',
   };
+
+  /// Synthesizes `student_attendance` rows from `attendance_days.student_marks`
+  /// in memory (0 extra Firestore reads), falling back to legacy
+  /// `student_attendance` documents only for older days that do not yet have
+  /// embedded `student_marks`.
+  Future<List<Map<String, dynamic>>> _resolveStudentAttendanceFromDaysOrLegacy(
+    fs.CollectionReference<Map<String, dynamic>> col,
+    Map<String, Object?> eqMap,
+  ) async {
+    final schoolRef = '${eqMap['school_ref'] ?? ''}'.trim();
+    if (schoolRef.isEmpty) {
+      return _runCollectionQuery(col, eqMap);
+    }
+
+    final allDays = await _client._cachedSchoolTableRows(
+      'attendance_days',
+      schoolRef,
+    );
+    final eqDayId = '${eqMap['attendance_day_id'] ?? ''}'.trim();
+    final eqClassId = '${eqMap['class_id'] ?? ''}'.trim();
+    final inDayIds = _inFilters['attendance_day_id']
+        ?.where((v) => v != null)
+        .map((v) => '$v'.trim())
+        .where((s) => s.isNotEmpty)
+        .toSet();
+
+    final candidateDays = <Map<String, dynamic>>[];
+    for (final d in allDays) {
+      final did = '${d['id'] ?? ''}'.trim();
+      if (did.isEmpty) continue;
+      if (eqDayId.isNotEmpty && did != eqDayId) continue;
+      if (inDayIds != null && !inDayIds.contains(did)) continue;
+      if (eqClassId.isNotEmpty && '${d['class_id'] ?? ''}'.trim() != eqClassId) {
+        continue;
+      }
+      candidateDays.add(d);
+    }
+
+    final synthesized = <Map<String, dynamic>>[];
+    final embeddedDayIds = <String>{};
+    final legacyDayIds = <String>{};
+
+    for (final d in candidateDays) {
+      final did = '${d['id'] ?? ''}'.trim();
+      final rawMarks = d['student_marks'];
+      if (rawMarks is Map) {
+        embeddedDayIds.add(did);
+        rawMarks.forEach((k, v) {
+          final sid = '$k'.trim();
+          if (sid.isEmpty) return;
+          final m = v is Map ? v : const <String, dynamic>{};
+          synthesized.add(<String, dynamic>{
+            'id': '${did}__$sid',
+            'school_ref': '${d['school_ref'] ?? schoolRef}',
+            'class_id': '${d['class_id'] ?? ''}',
+            'attendance_day_id': did,
+            'attendance_date': '${d['attendance_date'] ?? ''}',
+            'student_id': sid,
+            'present': m['present'] == true || m['p'] == true || m['p'] == 1,
+            'mdm': m['mdm'] == true || m['m'] == true || m['m'] == 1,
+            'breakfast':
+                m['breakfast'] == true || m['b'] == true || m['b'] == 1,
+            'updated_by_teacher':
+                m['updated_by_teacher'] ?? d['updated_by_teacher'],
+            'updated_at': '${d['updated_at'] ?? ''}',
+          });
+        });
+      } else if (d['has_embedded_marks'] == true) {
+        embeddedDayIds.add(did);
+      } else if ('${d['attendance_mode'] ?? 'student'}' != 'direct' &&
+          d['student_details_saved'] != false) {
+        legacyDayIds.add(did);
+      }
+    }
+
+    if (legacyDayIds.isEmpty) {
+      return synthesized;
+    }
+
+    // Fetch legacy student_attendance rows (cached per school or per single day)
+    List<Map<String, dynamic>> legacyRows;
+    if (legacyDayIds.length == 1 && eqDayId.isNotEmpty) {
+      legacyRows = await _runCollectionQuery(col, eqMap);
+    } else {
+      legacyRows = await _client._cachedSchoolTableRows(
+        'student_attendance',
+        schoolRef,
+      );
+    }
+
+    final legacyByDay = <String, Map<String, Map<String, dynamic>>>{};
+    for (final r in legacyRows) {
+      final did = '${r['attendance_day_id'] ?? ''}'.trim();
+      if (did.isEmpty || embeddedDayIds.contains(did)) continue;
+      final sid = '${r['student_id'] ?? ''}'.trim();
+      if (sid.isNotEmpty) {
+        legacyByDay.putIfAbsent(did, () => <String, Map<String, dynamic>>{})[sid] =
+            <String, dynamic>{
+              'present': r['present'] == true,
+              'mdm': r['mdm'] == true,
+              'breakfast': r['breakfast'] == true,
+              if (r['updated_by_teacher'] != null)
+                'updated_by_teacher': r['updated_by_teacher'],
+            };
+      }
+      if (legacyDayIds.contains(did)) {
+        synthesized.add(Map<String, dynamic>.from(r));
+      }
+    }
+
+    // Backfill in-memory attendance_days cache with legacy marks so subsequent
+    // report downloads in this session require 0 legacy queries!
+    final daysCacheKey = 'attendance_days|school_ref=$schoolRef|in=';
+    final cachedDaysEntry = _queryCache[daysCacheKey];
+    if (cachedDaysEntry != null) {
+      for (final d in cachedDaysEntry.rows) {
+        final did = '${d['id'] ?? ''}'.trim();
+        if (d['student_marks'] == null && legacyDayIds.contains(did)) {
+          d['student_marks'] =
+              legacyByDay[did] ?? const <String, Map<String, dynamic>>{};
+          d['has_embedded_marks'] = true;
+        }
+      }
+    }
+
+    return synthesized;
+  }
 
   static int _cacheTtlSecondsForTable(String table) =>
       _longTtlMasterTables.contains(table) ? 900 : 300;
@@ -916,6 +1116,105 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
     _inFlightReads.removeWhere((k, _) => k.startsWith('$table|'));
   }
 
+  /// Patches already-cached rows in memory after a local write so callers do
+  /// not re-download an entire school collection (e.g. 1,800+ attendance_days)
+  /// right after saving 1 document.
+  static void patchCacheRows(
+    String table,
+    List<Map<String, dynamic>> savedRows,
+  ) {
+    if (savedRows.isEmpty) return;
+    _tableGeneration[table] = (_tableGeneration[table] ?? 0) + 1;
+    _inFlightReads.removeWhere((k, _) => k.startsWith('$table|'));
+    final byId = <String, Map<String, dynamic>>{
+      for (final r in savedRows)
+        if ('${r['id'] ?? ''}'.trim().isNotEmpty)
+          '${r['id']}'.trim(): Map<String, dynamic>.from(r),
+    };
+    if (byId.isEmpty) {
+      invalidateCache(table);
+      return;
+    }
+    final now = DateTime.now();
+    for (final entry in byId.entries) {
+      _queryCache['$table|__doc__=${entry.key}'] = (
+        ts: now,
+        rows: <Map<String, dynamic>>[Map<String, dynamic>.from(entry.value)],
+      );
+    }
+    final existingKeys = _queryCache.keys
+        .where((k) => k.startsWith('$table|') && !k.startsWith('$table|__doc__='))
+        .toList();
+    for (final k in existingKeys) {
+      if (k.startsWith('$table|school_ref=') && k.endsWith('|in=')) {
+        final ref = k.substring(
+          '$table|school_ref='.length,
+          k.length - '|in='.length,
+        );
+        final cached = _queryCache[k];
+        if (cached == null) continue;
+        final list =
+            cached.rows.map((r) => Map<String, dynamic>.from(r)).toList();
+        var changed = false;
+        for (final row in byId.values) {
+          final rowRef = '${row['school_ref'] ?? ''}'.trim();
+          if (rowRef.isNotEmpty && rowRef != ref) continue;
+          final id = '${row['id']}'.trim();
+          final idx = list.indexWhere((e) => '${e['id'] ?? ''}'.trim() == id);
+          if (idx >= 0) {
+            list[idx] = <String, dynamic>{...list[idx], ...row};
+          } else {
+            list.add(Map<String, dynamic>.from(row));
+          }
+          changed = true;
+        }
+        if (changed) {
+          _queryCache[k] = (ts: cached.ts, rows: list);
+        }
+      } else {
+        _queryCache.remove(k);
+      }
+    }
+  }
+
+  /// Merges embedded `student_marks` patches into cached `attendance_days`
+  /// documents in memory without triggering a full-school reload.
+  static void patchEmbeddedAttendanceMarks(
+    Map<String, Map<String, Map<String, dynamic>>> byDayId,
+    String nowIso,
+  ) {
+    if (byDayId.isEmpty) return;
+    _tableGeneration['attendance_days'] =
+        (_tableGeneration['attendance_days'] ?? 0) + 1;
+    _inFlightReads.removeWhere((k, _) => k.startsWith('attendance_days|'));
+    final existingKeys = _queryCache.keys
+        .where((k) => k.startsWith('attendance_days|'))
+        .toList();
+    for (final k in existingKeys) {
+      final cached = _queryCache[k];
+      if (cached == null) continue;
+      final list =
+          cached.rows.map((r) => Map<String, dynamic>.from(r)).toList();
+      var changed = false;
+      for (final d in list) {
+        final did = '${d['id'] ?? ''}'.trim();
+        final patch = byDayId[did];
+        if (patch == null) continue;
+        final existingMarks = d['student_marks'] is Map
+            ? Map<String, dynamic>.from(d['student_marks'] as Map)
+            : <String, dynamic>{};
+        existingMarks.addAll(patch);
+        d['student_marks'] = existingMarks;
+        d['has_embedded_marks'] = true;
+        d['updated_at'] = nowIso;
+        changed = true;
+      }
+      if (changed) {
+        _queryCache[k] = (ts: cached.ts, rows: list);
+      }
+    }
+  }
+
   Future<List<Map<String, dynamic>>> _runCollectionQuery(
     fs.CollectionReference<Map<String, dynamic>> col,
     Map<String, Object?> eqMap,
@@ -952,7 +1251,7 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
     final now = DateTime.now();
     final ttlSec = _cacheTtlSecondsForTable(_table);
     final schoolRefFilter = '${eqMap['school_ref'] ?? ''}'.trim();
-    if (schoolRefFilter.isNotEmpty && pushedKey != 'school_ref') {
+    if (schoolRefFilter.isNotEmpty) {
       final schoolWideKey = '$_table|school_ref=$schoolRefFilter|in=';
       final schoolWideCached = _queryCache[schoolWideKey];
       if (schoolWideCached != null &&
@@ -963,8 +1262,10 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
       }
     }
 
+    // When pushedKey != null, _inFilters was NOT pushed to Firestore; cache
+    // under the pushedKey alone so subsequent inFilter slices reuse 0 reads.
     final cacheKey =
-        '$_table|$pushedKey=${pushedKey != null ? eqMap[pushedKey] : ""}|in=${_inFilters.isEmpty ? "" : _inFilters.toString()}';
+        '$_table|$pushedKey=${pushedKey != null ? eqMap[pushedKey] : ""}|in=${pushedKey == null && _inFilters.isNotEmpty ? _inFilters.toString() : ""}';
     final cached = _queryCache[cacheKey];
     if (cached != null && now.difference(cached.ts).inSeconds < ttlSec) {
       return cached.rows.map((r) => Map<String, dynamic>.from(r)).toList();
@@ -1255,6 +1556,54 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
       );
     }
 
+    // Optimization #1: Pack student_attendance upserts into a single embedded
+    // `student_marks` map on the parent `attendance_days` document (1 write
+    // instead of 40-50 separate document writes per class).
+    if (_table == 'student_attendance') {
+      final byDayId = <String, Map<String, Map<String, dynamic>>>{};
+      for (final raw in _payloadRows) {
+        final row = Map<String, dynamic>.from(raw);
+        final dayId = '${row['attendance_day_id'] ?? ''}'.trim();
+        final studentId = '${row['student_id'] ?? ''}'.trim();
+        if (dayId.isEmpty || studentId.isEmpty) continue;
+        row['school_ref'] = '${row['school_ref'] ?? schoolRef}'.trim();
+        row['id'] = '${dayId}__$studentId';
+        row['updated_at'] ??= nowIso;
+        savedRows.add(row);
+        final dayMap = byDayId.putIfAbsent(
+          dayId,
+          () => <String, Map<String, dynamic>>{},
+        );
+        dayMap[studentId] = <String, dynamic>{
+          'present': row['present'] == true,
+          'mdm': row['mdm'] == true,
+          'breakfast': row['breakfast'] == true,
+          if (row['updated_by_teacher'] != null)
+            'updated_by_teacher': row['updated_by_teacher'],
+        };
+      }
+      for (final entry in byDayId.entries) {
+        final dayId = entry.key;
+        final marksPatch = entry.value;
+        final embedHashKey = 'student_attendance_embed/$dayId';
+        final sig = jsonEncode(marksPatch);
+        if (_lastWrittenPayloadHash[embedHashKey] != sig) {
+          await _client._db.collection('attendance_days').doc(dayId).set(
+            <String, dynamic>{
+              'student_marks': marksPatch,
+              'has_embedded_marks': true,
+              'updated_at': nowIso,
+            },
+            fs.SetOptions(merge: true),
+          );
+          _lastWrittenPayloadHash[embedHashKey] = sig;
+        }
+      }
+      patchEmbeddedAttendanceMarks(byDayId, nowIso);
+      invalidateCache('student_attendance');
+      return savedRows;
+    }
+
     // Special handling for school_rojmel_state (chunking states > 700 KB)
     if (_table == 'school_rojmel_state') {
       if (ctx != null && !ctx.isAdmin) {
@@ -1371,7 +1720,7 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
         final existing = await _client
             .from('attendance_days')
             .select(
-              'id,registered_counts,present_counts,mdm_counts,breakfast_total,gender_breakdown,attendance_mode,student_details_saved,is_frozen,unfrozen_by_admin,present_saved,mdm_saved,breakfast_saved,present_frozen,mdm_frozen,breakfast_frozen',
+              'id,registered_counts,present_counts,mdm_counts,breakfast_total,gender_breakdown,attendance_mode,student_details_saved,is_frozen,unfrozen_by_admin,present_saved,mdm_saved,breakfast_saved,present_frozen,mdm_frozen,breakfast_frozen,student_marks,has_embedded_marks',
             )
             .eq('school_ref', '${row['school_ref']}')
             .eq('class_id', '${row['class_id']}')
@@ -1440,7 +1789,15 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
     if (batchOps > 0) {
       await batch.commit();
     }
-    invalidateCache(_table);
+    if (_table == 'attendance_days' ||
+        _table == 'school_settings' ||
+        _table == 'student_subject_marks' ||
+        _table == 'student_result_profiles' ||
+        _table == 'student_private_details') {
+      patchCacheRows(_table, savedRows);
+    } else {
+      invalidateCache(_table);
+    }
     if (_table == 'class_subjects' ||
         _table == 'school_subject_master' ||
         _table == 'school_classes') {
@@ -1606,7 +1963,15 @@ class FirestoreQueryBuilder implements Future<List<Map<String, dynamic>>> {
     if (ops > 0) {
       await batch.commit();
     }
-    invalidateCache(_table);
+    if (_table == 'attendance_days' ||
+        _table == 'school_settings' ||
+        _table == 'student_subject_marks' ||
+        _table == 'student_result_profiles' ||
+        _table == 'student_private_details') {
+      patchCacheRows(_table, updatedRows);
+    } else {
+      invalidateCache(_table);
+    }
     final studentRollAffectingChange = _table == 'students' &&
         (patch.containsKey('roll_number') ||
             patch.containsKey('class_id') ||
@@ -1725,6 +2090,11 @@ class _TeacherSessionContext {
   bool canRecordAttendance(String classId) =>
       isAdmin || attendanceClassIds.contains(classId.trim());
 
+  /// Only School Admin and the designated Class Teacher of [classId] may add
+  /// or deactivate students in [classId] (never Subject Teachers).
+  bool canManageClassStudents(String classId) =>
+      isAdmin || classTeacherClassIds.contains(classId.trim());
+
   /// Admin: every class. Class teacher: every subject of their own class.
   /// Subject teacher: only the subjects they teach in other classes.
   bool canEnterMarks(String classId, String subjectName) {
@@ -1785,6 +2155,52 @@ class SupabaseClient {
   _TeacherSessionContext? _cachedContext;
   String? _cachedContextUid;
   DateTime? _cachedContextTime;
+  _TeacherSessionContext? _developerImpersonatedContext;
+  Map<String, dynamic>? _developerImpersonatedProfile;
+
+  bool get isDeveloperImpersonatingSchool =>
+      _developerImpersonatedContext != null;
+
+  Map<String, dynamic>? get developerImpersonatedProfile =>
+      _developerImpersonatedProfile;
+
+  void activateDeveloperSchoolAdminSession(Map<String, dynamic> sessionPayload) {
+    final school = sessionPayload['school'] is Map
+        ? Map<String, dynamic>.from(sessionPayload['school'] as Map)
+        : <String, dynamic>{};
+    final profile = sessionPayload['profile'] is Map
+        ? Map<String, dynamic>.from(sessionPayload['profile'] as Map)
+        : <String, dynamic>{};
+    final schoolRef = '${school['id'] ?? profile['school_ref'] ?? ''}'.trim();
+    final teacherId =
+        '${profile['teacher_id'] ?? school['admin_id'] ?? 'dev_admin_$schoolRef'}'
+            .trim();
+    final teacherName =
+        '${profile['teacher_name'] ?? school['admin_name'] ?? 'School Admin (Developer)'}'
+            .trim();
+    _developerImpersonatedContext = _TeacherSessionContext(
+      authUserId: 'dev_impersonate_${schoolRef}_$teacherId',
+      teacherId: teacherId,
+      teacherName: teacherName,
+      schoolRef: schoolRef,
+      role: 'admin',
+      allowedClasses: const <String>[],
+      schoolRow: school,
+    );
+    _developerImpersonatedProfile = <String, dynamic>{
+      ...profile,
+      'is_developer_session': true,
+    };
+    _clearIdentityCache();
+    FirestoreQueryBuilder.clearAllForSessionChange();
+  }
+
+  void deactivateDeveloperSchoolAdminSession() {
+    _developerImpersonatedContext = null;
+    _developerImpersonatedProfile = null;
+    _clearIdentityCache();
+    FirestoreQueryBuilder.clearAllForSessionChange();
+  }
 
   void _clearIdentityCache() {
     _cachedContext = null;
@@ -1829,6 +2245,31 @@ class SupabaseClient {
   Future<_TeacherSessionContext?> _resolveCurrentTeacherContext({
     bool forceRefresh = false,
   }) async {
+    final imp = _developerImpersonatedContext;
+    if (imp != null) {
+      if (forceRefresh) {
+        try {
+          final schoolSnap =
+              await _db.collection('schools').doc(imp.schoolRef).get();
+          if (schoolSnap.exists && schoolSnap.data() != null) {
+            final updatedSchool = <String, dynamic>{
+              ...schoolSnap.data()!,
+              'id': schoolSnap.data()!['id'] ?? schoolSnap.id,
+            };
+            _developerImpersonatedContext = _TeacherSessionContext(
+              authUserId: imp.authUserId,
+              teacherId: imp.teacherId,
+              teacherName: imp.teacherName,
+              schoolRef: imp.schoolRef,
+              role: 'admin',
+              allowedClasses: imp.allowedClasses,
+              schoolRow: updatedSchool,
+            );
+          }
+        } catch (_) {}
+      }
+      return _developerImpersonatedContext;
+    }
     final user = auth.currentUser;
     if (user == null) {
       _clearIdentityCache();
@@ -1939,7 +2380,10 @@ class SupabaseClient {
           final cid = '${c['id']}';
           final direct = <String>[cid, '${c['class_key'] ?? ''}', '${c['label'] ?? ''}']
               .any((t) => t.trim().isNotEmpty && allowedTokens.contains(token(t)));
-          final isClassTeacher = '${c['class_teacher_id'] ?? ''}'.trim() == tId;
+          final explicitCt = '${c['class_teacher_id'] ?? ''}'.trim();
+          final isClassTeacher = explicitCt.isNotEmpty
+              ? explicitCt == tId
+              : direct;
           if (isClassTeacher) classTeacherIds.add(cid);
           if (direct || isClassTeacher) {
             attendanceIds.add(cid);
@@ -1995,6 +2439,693 @@ class SupabaseClient {
     return ctx;
   }
 
+  static String _canonicalAttendancePermissionMode(dynamic raw) {
+    final s = '${raw ?? ''}'.trim().toLowerCase();
+    switch (s) {
+      case 'only_class_teacher':
+      case 'class_teacher_only':
+        return 'only_class_teacher';
+      case 'section_wise_class_teachers':
+      case 'same_standard_class_teachers':
+      case 'section_wise':
+        return 'section_wise_class_teachers';
+      case 'any_teacher_all_classes':
+      case 'all_teachers_all_classes':
+      case 'any_teacher':
+        return 'any_teacher_all_classes';
+      case 'subject_and_class_teachers':
+      default:
+        return 'subject_and_class_teachers';
+    }
+  }
+
+  /// Computes which active classes the signed-in user may record student
+  /// attendance (with PM POSHAN & Breakfast) for on [targetDateIso], honoring:
+  /// 1. Admin always has access to all classes.
+  /// 2. The school's `attendance_recording_permission_mode` in `school_settings.config`:
+  ///    - `only_class_teacher`
+  ///    - `section_wise_class_teachers` (e.g. 6A class teacher -> 6A, 6B, 6C, 6D...)
+  ///    - `subject_and_class_teachers` (default / current)
+  ///    - `any_teacher_all_classes`
+  /// 3. Leave In-Charge logic across modes 1, 2, and 3: when a teacher is on
+  ///    leave (`start_date <= date <= end_date`, status != rejected/cancelled),
+  ///    the designated `charge_teacher_id` can record attendance for that
+  ///    on-leave teacher's classes during the leave period only.
+  Future<Map<String, dynamic>> _computeAttendanceEntryAccessForDate({
+    required _TeacherSessionContext ctx,
+    String? targetDateIso,
+  }) async {
+    final rawDate = (targetDateIso ?? '').trim();
+    final parsedDate = _parseAnyDateToIso(rawDate) ?? rawDate;
+    final effectiveDate = parsedDate.length >= 10
+        ? parsedDate.substring(0, 10)
+        : _indiaTodayIso();
+    final schoolRef = ctx.schoolRef.trim();
+
+    String mode = 'subject_and_class_teachers';
+    try {
+      final settingsData = await _cachedDocData('school_settings', schoolRef);
+      final cfg = settingsData?['config'];
+      if (cfg is Map) {
+        mode = _canonicalAttendancePermissionMode(
+          cfg['attendance_recording_permission_mode'],
+        );
+      }
+    } catch (_) {}
+
+    final clsRows = await _cachedSchoolTableRows('school_classes', schoolRef);
+    final allClasses = <Map<String, dynamic>>[];
+    final classById = <String, Map<String, dynamic>>{};
+    for (final data in clsRows) {
+      if (data['is_active'] == false) continue;
+      final cid = '${data['id'] ?? ''}'.trim();
+      if (cid.isEmpty) continue;
+      final row = <String, dynamic>{...data, 'id': cid};
+      allClasses.add(row);
+      classById[cid] = row;
+    }
+
+    if (ctx.isAdmin) {
+      final allIds = allClasses.map((c) => '${c['id']}').toList();
+      return <String, dynamic>{
+        'permission_mode': mode,
+        'attendance_date': effectiveDate,
+        'classes': allClasses,
+        'allowed_class_ids': allIds,
+        'class_teacher_ids': allIds,
+        'role_by_class_id': <String, String>{
+          for (final id in allIds) id: 'admin',
+        },
+        'in_charge_info_by_class_id': <String, Map<String, dynamic>>{},
+      };
+    }
+
+    // Load school teachers, subject assignments, and leaves via shared 15-min memory cache
+    final results = await Future.wait([
+      _cachedSchoolTableRows('school_teachers', schoolRef),
+      _cachedSchoolTableRows('teacher_subject_assignments', schoolRef),
+      _cachedSchoolTableRows('teacher_leaves', schoolRef),
+    ]);
+
+    final teacherRows = results[0];
+    final assignRows = results[1];
+    final leaveRows = results[2];
+
+    final teachersById = <String, Map<String, dynamic>>{};
+    for (final data in teacherRows) {
+      final tid = '${data['id'] ?? ''}'.trim();
+      if (tid.isEmpty) continue;
+      teachersById[tid] = <String, dynamic>{...data, 'id': tid};
+    }
+
+    final subjectClassesByTeacher = <String, Set<String>>{};
+    for (final data in assignRows) {
+      final tid = '${data['teacher_id'] ?? ''}'.trim();
+      final cid = '${data['class_id'] ?? ''}'.trim();
+      if (tid.isEmpty || cid.isEmpty || !classById.containsKey(cid)) continue;
+      subjectClassesByTeacher.putIfAbsent(tid, () => <String>{}).add(cid);
+    }
+
+    final anyExplicitClassTeacherInSchool = allClasses.any(
+      (c) => '${c['class_teacher_id'] ?? ''}'.trim().isNotEmpty,
+    );
+
+    String cleanToken(String v) => _TeacherSessionContext._cleanClassToken(v);
+
+    ({
+      Set<String> ctIds,
+      Set<String> sectionIds,
+      Set<String> subjectIds,
+      Set<String> eligibleIds,
+    }) computeForTeacher(String tid) {
+      final tRow = teachersById[tid];
+      final rawAllowed = tRow?['allowed_classes'];
+      final allowedTokens = rawAllowed is List
+          ? rawAllowed
+                .map((e) => cleanToken('$e'))
+                .where((s) => s.isNotEmpty)
+                .toSet()
+          : <String>{};
+
+      final explicitCtIds = <String>{};
+      final directAllowedClassIds = <String>{};
+      for (final c in allClasses) {
+        final cid = '${c['id']}';
+        final ct = '${c['class_teacher_id'] ?? ''}'.trim();
+        if (ct.isNotEmpty && ct == tid) {
+          explicitCtIds.add(cid);
+        }
+        final matchesAllowed = <String>[
+          cid,
+          '${c['class_key'] ?? ''}',
+          '${c['label'] ?? ''}',
+          '${c['sheet_name'] ?? ''}',
+        ].any((t) => t.trim().isNotEmpty && allowedTokens.contains(cleanToken(t)));
+        if (matchesAllowed) {
+          directAllowedClassIds.add(cid);
+        }
+      }
+
+      // If this teacher has explicit class_teacher_id assignments, use those
+      // strictly as their Class Teacher classes. Otherwise fall back to unowned
+      // direct allowed classes if no explicit class teacher is set on them.
+      final ctIds = <String>{...explicitCtIds};
+      if (ctIds.isEmpty && !anyExplicitClassTeacherInSchool) {
+        for (final cid in directAllowedClassIds) {
+          final c = classById[cid];
+          if (c != null && '${c['class_teacher_id'] ?? ''}'.trim().isEmpty) {
+            ctIds.add(cid);
+          }
+        }
+      }
+
+      // Section-wise classes: all active sections of any standard where [tid]
+      // is a Class Teacher (e.g. Class Teacher of 6A -> 6A, 6B, 6C, 6D...).
+      final ctStandards = <String>{
+        for (final cid in ctIds)
+          if (classById[cid] != null) _classStandardKey(classById[cid]!),
+      }..remove('');
+
+      final sectionIds = <String>{};
+      for (final c in allClasses) {
+        final cid = '${c['id']}';
+        final std = _classStandardKey(c);
+        if (std.isNotEmpty && ctStandards.contains(std)) {
+          sectionIds.add(cid);
+        }
+      }
+
+      // Subject teacher classes: classes from teacher_subject_assignments + allowed_classes
+      final assignedSubjIds = subjectClassesByTeacher[tid] ?? const <String>{};
+      final subjectIds = <String>{
+        ...assignedSubjIds,
+        ...directAllowedClassIds,
+      };
+      // In subject_and_class_teachers mode, also include same-standard sections of direct allowed classes (matching prior behavior)
+      final subjectAndSectionIds = <String>{...subjectIds};
+      final directStandards = <String>{
+        for (final cid in directAllowedClassIds)
+          if (classById[cid] != null) _classStandardKey(classById[cid]!),
+      }..remove('');
+      for (final c in allClasses) {
+        final std = _classStandardKey(c);
+        if (std.isNotEmpty && directStandards.contains(std)) {
+          subjectAndSectionIds.add('${c['id']}');
+        }
+      }
+
+      final Set<String> eligibleIds;
+      switch (mode) {
+        case 'only_class_teacher':
+          eligibleIds = <String>{...ctIds};
+          break;
+        case 'section_wise_class_teachers':
+          eligibleIds = <String>{...ctIds, ...sectionIds};
+          break;
+        case 'any_teacher_all_classes':
+          eligibleIds = <String>{for (final c in allClasses) '${c['id']}'};
+          break;
+        case 'subject_and_class_teachers':
+        default:
+          eligibleIds = <String>{
+            ...ctIds,
+            ...sectionIds,
+            ...subjectAndSectionIds,
+          };
+          break;
+      }
+
+      return (
+        ctIds: ctIds,
+        sectionIds: sectionIds,
+        subjectIds: subjectIds,
+        eligibleIds: eligibleIds,
+      );
+    }
+
+    final myId = ctx.teacherId.trim();
+    final myNameLower = ctx.teacherName.trim().toLowerCase();
+    final mySets = computeForTeacher(myId);
+
+    // Check active leaves on [effectiveDate] where current teacher is In-Charge
+    // (including transitive chain in-charge: if A gave charge to B, and B went
+    // on leave and gave charge to C, then C gets C's own classes + B's classes + A's classes).
+    final inChargeClassIds = <String>{};
+    final inChargeInfoByClassId = <String, Map<String, dynamic>>{};
+
+    final activeLeavesOnDate = <Map<String, dynamic>>[];
+    for (final l in leaveRows) {
+      final status = '${l['status'] ?? 'pending'}'.trim().toLowerCase();
+      if (status == 'rejected' || status == 'cancelled') continue;
+
+      final startIso = _extractIndiaDateIsoFromAny(l['start_date']);
+      final endIso = _extractIndiaDateIsoFromAny(l['end_date']);
+      if (startIso.isEmpty || endIso.isEmpty) continue;
+      if (effectiveDate.compareTo(startIso) < 0 ||
+          effectiveDate.compareTo(endIso) > 0) {
+        continue;
+      }
+      activeLeavesOnDate.add(l);
+    }
+
+    String resolveChargeTeacherId(Map<String, dynamic> l) {
+      final leaveData = l['leave_data'] is Map
+          ? Map<String, dynamic>.from(l['leave_data'] as Map)
+          : <String, dynamic>{};
+      final cid =
+          '${leaveData['charge_teacher_id'] ?? l['charge_teacher_id'] ?? ''}'
+              .trim();
+      if (cid.isNotEmpty) return cid;
+      final cname =
+          '${leaveData['charge_teacher_name'] ?? l['charge_teacher_name'] ?? ''}'
+              .trim()
+              .toLowerCase();
+      if (cname.isEmpty) return '';
+      if (myNameLower.isNotEmpty && cname == myNameLower) return myId;
+      for (final t in teacherRows) {
+        final tName = '${t['teacher_name'] ?? t['name'] ?? ''}'
+            .trim()
+            .toLowerCase();
+        if (tName.isNotEmpty && tName == cname) {
+          return '${t['id'] ?? ''}'.trim();
+        }
+      }
+      return '';
+    }
+
+    final directLeavesByChargeTeacher = <String, List<Map<String, dynamic>>>{};
+    final teachersOnLeaveToday = <String>{};
+    for (final l in activeLeavesOnDate) {
+      final onLeaveTid = '${l['teacher_id'] ?? ''}'.trim();
+      if (onLeaveTid.isNotEmpty) teachersOnLeaveToday.add(onLeaveTid);
+      final chargeTid = resolveChargeTeacherId(l);
+      if (onLeaveTid.isEmpty || chargeTid.isEmpty || onLeaveTid == chargeTid) {
+        continue;
+      }
+      directLeavesByChargeTeacher
+          .putIfAbsent(chargeTid, () => <Map<String, dynamic>>[])
+          .add(l);
+    }
+
+    // Only an active (non-on-leave) teacher—or a teacher who hasn't delegated
+    // their own leave—receives the incoming transitive in-charge chain.
+    final visitedTeachers = <String>{myId};
+    final queue = <({String teacherId, List<String> viaNames})>[
+      (teacherId: myId, viaNames: const <String>[]),
+    ];
+
+    while (queue.isNotEmpty) {
+      final current = queue.removeAt(0);
+      final incomingLeaves =
+          directLeavesByChargeTeacher[current.teacherId] ??
+          const <Map<String, dynamic>>[];
+
+      for (final l in incomingLeaves) {
+        final onLeaveTid = '${l['teacher_id'] ?? ''}'.trim();
+        if (onLeaveTid.isEmpty || visitedTeachers.contains(onLeaveTid)) {
+          continue;
+        }
+        visitedTeachers.add(onLeaveTid);
+
+        final leaveData = l['leave_data'] is Map
+            ? Map<String, dynamic>.from(l['leave_data'] as Map)
+            : <String, dynamic>{};
+        final startIso = _extractIndiaDateIsoFromAny(l['start_date']);
+        final endIso = _extractIndiaDateIsoFromAny(l['end_date']);
+        final onLeaveName =
+            '${leaveData['teacher_name'] ?? teachersById[onLeaveTid]?['teacher_name'] ?? 'શિક્ષક'}'
+                .trim();
+        final displayLeaveName = current.viaNames.isEmpty
+            ? onLeaveName
+            : '$onLeaveName (via ${current.viaNames.join(' → ')})';
+
+        final onLeaveSets = computeForTeacher(onLeaveTid);
+        // Leave logic applies across modes 1, 2, and 3 (and highlights in mode 4):
+        // the in-charge teacher gets the on-leave teacher's eligible classes
+        // (always including the on-leave teacher's own Class Teacher classes).
+        final coveredIds = mode == 'any_teacher_all_classes'
+            ? <String>{...onLeaveSets.ctIds, ...onLeaveSets.sectionIds}
+            : <String>{...onLeaveSets.ctIds, ...onLeaveSets.eligibleIds};
+
+        for (final cid in coveredIds) {
+          inChargeClassIds.add(cid);
+          final isDirectCtOfOnLeave = onLeaveSets.ctIds.contains(cid);
+          if (!inChargeInfoByClassId.containsKey(cid) || isDirectCtOfOnLeave) {
+            inChargeInfoByClassId[cid] = <String, dynamic>{
+              'on_leave_teacher_id': onLeaveTid,
+              'on_leave_teacher_name': displayLeaveName,
+              'start_date': startIso,
+              'end_date': endIso,
+              'leave_type': '${l['leave_type'] ?? ''}',
+              'chain_depth': current.viaNames.length + 1,
+            };
+          }
+        }
+
+        queue.add((
+          teacherId: onLeaveTid,
+          viaNames: <String>[...current.viaNames, onLeaveName],
+        ));
+      }
+    }
+
+    final finalAllowedIds = <String>{
+      ...mySets.eligibleIds,
+      ...inChargeClassIds,
+    };
+
+    final roleByClassId = <String, String>{};
+    for (final cid in finalAllowedIds) {
+      if (mySets.ctIds.contains(cid)) {
+        roleByClassId[cid] = 'class_teacher';
+      } else if (inChargeInfoByClassId.containsKey(cid)) {
+        roleByClassId[cid] = 'in_charge_teacher';
+      } else if (mySets.sectionIds.contains(cid)) {
+        roleByClassId[cid] = 'section_teacher';
+      } else if (mySets.subjectIds.contains(cid)) {
+        roleByClassId[cid] = 'subject_teacher';
+      } else {
+        roleByClassId[cid] = 'any_teacher';
+      }
+    }
+
+    final allowedClassesList = allClasses
+        .where((c) => finalAllowedIds.contains('${c['id']}'))
+        .toList();
+
+    return <String, dynamic>{
+      'permission_mode': mode,
+      'attendance_date': effectiveDate,
+      'classes': allowedClassesList,
+      'allowed_class_ids': finalAllowedIds.toList(),
+      'class_teacher_ids': mySets.ctIds.toList(),
+      'role_by_class_id': roleByClassId,
+      'in_charge_info_by_class_id': inChargeInfoByClassId,
+    };
+  }
+
+  static const List<int> _absenceMilestones = <int>[4, 7, 10, 15, 21, 30];
+
+  static String _absenceMilestoneMessageGu(int milestone) {
+    switch (milestone) {
+      case 4:
+        return 'આ વિદ્યાર્થી સતત ૪ દિવસથી ગેરહાજર છે. કૃપા કરીને અન્ય વિદ્યાર્થીઓને કહીને ફોન કરાવવો અથવા ગેરહાજરીનું કારણ પૂછવું.';
+      case 7:
+        return 'આ વિદ્યાર્થી સતત ૭ દિવસથી ગેરહાજર છે. કૃપા કરીને શિક્ષકે વિદ્યાર્થીના વાલીનો રૂબરૂ સંપર્ક કરવો.';
+      case 10:
+        return 'આ વિદ્યાર્થી સતત ૧૦ દિવસથી ગેરહાજર છે. કૃપા કરીને વર્ગ શિક્ષકને વિદ્યાર્થીની ગેરહાજરીનું કારણ પૂછવું.';
+      case 15:
+        return 'આ વિદ્યાર્થી સતત ૧૫ દિવસથી ગેરહાજર છે. કૃપા કરીને વાલીની રૂબરૂ મુલાકાત લેવી.';
+      case 21:
+        return 'આ વિદ્યાર્થી સતત ૨૧ દિવસથી ગેરહાજર છે. કૃપા કરીને CRC કો-ઓર્ડિનેટરને જાણ કરી આચાર્યશ્રી સાથે વાલીની રૂબરૂ મુલાકાત લેવી.';
+      case 30:
+        return 'આ વિદ્યાર્થી સતત ૩૦ દિવસથી ગેરહાજર છે. કૃપા કરીને SMC (શાળા વ્યવસ્થાપન સમિતિ) ને આ બાબતે જાણ કરવી.';
+      default:
+        return '';
+    }
+  }
+
+  static bool _milestoneAppliesToRole(int milestone, String roleScope) {
+    if (roleScope == 'admin') {
+      return milestone == 10 ||
+          milestone == 15 ||
+          milestone == 21 ||
+          milestone == 30;
+    }
+    return milestone == 4 ||
+        milestone == 7 ||
+        milestone == 15 ||
+        milestone == 21 ||
+        milestone == 30;
+  }
+
+  Future<Map<String, dynamic>> _computeStudentAbsenceStreaksAndAlerts({
+    required String schoolRef,
+    required _TeacherSessionContext ctx,
+    String filterClassId = '',
+    required String roleScope,
+  }) async {
+    final results = await Future.wait([
+      _cachedSchoolTableRows('school_classes', schoolRef),
+      _cachedSchoolTableRows('students', schoolRef),
+      _cachedSchoolTableRows('attendance_days', schoolRef),
+      _cachedSchoolTableRows('student_absence_alert_acks', schoolRef),
+    ]);
+    final classRows = results[0]
+        .where((c) => c['is_active'] != false)
+        .toList();
+    final studentRows = results[1]
+        .where(
+          (s) =>
+              s['is_active'] == true &&
+              '${s['leaving_date'] ?? ''}'.trim().isEmpty &&
+              '${s['exit_date'] ?? ''}'.trim().isEmpty,
+        )
+        .toList();
+    final dayRows = results[2];
+    final ackRows = results[3];
+
+    final ackedSet = <String>{
+      for (final a in ackRows) '${a['id'] ?? ''}'.trim(),
+    };
+
+    final classById = <String, Map<String, dynamic>>{
+      for (final c in classRows) '${c['id'] ?? ''}'.trim(): c,
+    };
+
+    // Determine which classes are in scope for this user
+    final allowedClassIds = <String>{};
+    if (filterClassId.isNotEmpty) {
+      allowedClassIds.add(filterClassId);
+    } else if (ctx.isAdmin) {
+      allowedClassIds.addAll(classById.keys);
+    } else {
+      for (final c in classRows) {
+        final cid = '${c['id'] ?? ''}'.trim();
+        if (ctx.classTeacherClassIds.contains(cid) ||
+            ctx.canAccessClassRow(c)) {
+          allowedClassIds.add(cid);
+        }
+      }
+    }
+
+    // Group ONLY student-wise attendance_days by class_id (strictly skip Direct Entry!)
+    final studentWiseDaysByClass = <String, List<Map<String, dynamic>>>{};
+    final fallbackDayIds = <String>[];
+    for (final d in dayRows) {
+      final cid = '${d['class_id'] ?? ''}'.trim();
+      if (!allowedClassIds.contains(cid)) continue;
+      final mode = '${d['attendance_mode'] ?? 'student'}'.trim().toLowerCase();
+      if (mode == 'direct' || d['student_details_saved'] == false) continue;
+      if (d['present_saved'] == false) continue;
+      studentWiseDaysByClass
+          .putIfAbsent(cid, () => <Map<String, dynamic>>[])
+          .add(d);
+      if (d['student_marks'] is! Map) {
+        final did = '${d['id'] ?? ''}'.trim();
+        if (did.isNotEmpty) fallbackDayIds.add(did);
+      }
+    }
+
+    // Optional legacy fallback if any older attendance_days doc lacks embedded student_marks
+    final legacyMarksByDay = <String, Map<String, bool>>{};
+    if (fallbackDayIds.isNotEmpty) {
+      try {
+        final saRows = await _cachedSchoolTableRows(
+          'student_attendance',
+          schoolRef,
+        );
+        final wantSet = fallbackDayIds.toSet();
+        for (final r in saRows) {
+          final did = '${r['attendance_day_id'] ?? ''}'.trim();
+          if (!wantSet.contains(did)) continue;
+          final sid = '${r['student_id'] ?? ''}'.trim();
+          if (sid.isEmpty) continue;
+          legacyMarksByDay.putIfAbsent(did, () => <String, bool>{})[sid] =
+              r['present'] == true;
+        }
+      } catch (_) {}
+    }
+
+    for (final list in studentWiseDaysByClass.values) {
+      list.sort(
+        (a, b) => '${a['attendance_date'] ?? ''}'.compareTo(
+          '${b['attendance_date'] ?? ''}',
+        ),
+      );
+    }
+
+    final todayIso = _indiaTodayIso();
+    final currentMonthPrefix = todayIso.length >= 7 ? todayIso.substring(0, 7) : '';
+
+    final allAlerts = <Map<String, dynamic>>[];
+    final dueMilestonePopups = <Map<String, dynamic>>[];
+
+    for (final st in studentRows) {
+      final cid = '${st['class_id'] ?? ''}'.trim();
+      if (!allowedClassIds.contains(cid)) continue;
+      final days = studentWiseDaysByClass[cid];
+      if (days == null || days.isEmpty) continue;
+
+      final sid = '${st['id'] ?? ''}'.trim();
+      if (sid.isEmpty) continue;
+
+      // Compute consecutive absent streak from most recent recorded student-wise day backward
+      var streak = 0;
+      var spellStartDate = '';
+      var latestAbsentDate = '';
+
+      for (var i = days.length - 1; i >= 0; i--) {
+        final d = days[i];
+        final did = '${d['id'] ?? ''}'.trim();
+        final dDate = _extractIndiaDateIsoFromAny(d['attendance_date']);
+        bool? isPresent;
+        if (d['student_marks'] is Map) {
+          final m = (d['student_marks'] as Map)[sid];
+          if (m is Map) {
+            isPresent = m['present'] == true;
+          }
+        } else if (legacyMarksByDay.containsKey(did) &&
+            legacyMarksByDay[did]!.containsKey(sid)) {
+          isPresent = legacyMarksByDay[did]![sid];
+        }
+        if (isPresent == null) {
+          // Student was not in class roster on this day; skip
+          continue;
+        }
+        if (isPresent == false) {
+          streak++;
+          if (latestAbsentDate.isEmpty) latestAbsentDate = dDate;
+          spellStartDate = dDate;
+        } else {
+          break;
+        }
+      }
+
+      // Compute current month attendance %
+      var monthWorking = 0;
+      var monthPresent = 0;
+      var monthAbsent = 0;
+      for (final d in days) {
+        final dDate = _extractIndiaDateIsoFromAny(d['attendance_date']);
+        if (currentMonthPrefix.isNotEmpty &&
+            !dDate.startsWith(currentMonthPrefix)) {
+          continue;
+        }
+        final did = '${d['id'] ?? ''}'.trim();
+        bool? isPresent;
+        if (d['student_marks'] is Map) {
+          final m = (d['student_marks'] as Map)[sid];
+          if (m is Map) isPresent = m['present'] == true;
+        } else if (legacyMarksByDay.containsKey(did) &&
+            legacyMarksByDay[did]!.containsKey(sid)) {
+          isPresent = legacyMarksByDay[did]![sid];
+        }
+        if (isPresent == null) continue;
+        monthWorking++;
+        if (isPresent) {
+          monthPresent++;
+        } else {
+          monthAbsent++;
+        }
+      }
+      final monthPct = monthWorking > 0
+          ? (monthPresent * 100.0 / monthWorking)
+          : 100.0;
+
+      final clsLabel =
+          '${classById[cid]?['label'] ?? classById[cid]?['class_key'] ?? 'Class'}'
+              .trim();
+      final stName = '${st['name'] ?? st['name_en'] ?? 'Student'}'.trim();
+      final rollNo = '${st['roll_number'] ?? ''}'.trim();
+      final mobile = '${st['mobile'] ?? ''}'.trim();
+
+      if (streak >= 3 || (monthWorking >= 3 && monthPct < 75.0)) {
+        allAlerts.add(<String, dynamic>{
+          'student_id': sid,
+          'student_name': stName,
+          'roll_number': rollNo,
+          'class_id': cid,
+          'class_label': clsLabel,
+          'mobile': mobile,
+          'consecutive_absent': streak,
+          'spell_start_date': spellStartDate,
+          'latest_absent_date': latestAbsentDate,
+          'month_working_days': monthWorking,
+          'month_present_days': monthPresent,
+          'month_absent_days': monthAbsent,
+          'month_percentage': double.parse(monthPct.toStringAsFixed(1)),
+        });
+      }
+
+      // Exact milestone popup check (<= 30 days only; > 30 days = NO reminder!)
+      if (streak >= 4 && streak <= 30 && spellStartDate.isNotEmpty) {
+        // Trigger ONLY if streak matches one of the exact milestones for this role
+        if (_absenceMilestones.contains(streak) &&
+            _milestoneAppliesToRole(streak, roleScope)) {
+          final ackKey =
+              '${schoolRef}__${sid}__${spellStartDate}__${streak}__$roleScope';
+          if (!ackedSet.contains(ackKey)) {
+            dueMilestonePopups.add(<String, dynamic>{
+              'ack_key': ackKey,
+              'student_id': sid,
+              'student_name': stName,
+              'roll_number': rollNo,
+              'class_id': cid,
+              'class_label': clsLabel,
+              'mobile': mobile,
+              'milestone': streak,
+              'spell_start_date': spellStartDate,
+              'latest_absent_date': latestAbsentDate,
+              'action_message_gu': _absenceMilestoneMessageGu(streak),
+            });
+          }
+        }
+      }
+    }
+
+    allAlerts.sort((a, b) {
+      final sCmp = ((b['consecutive_absent'] as int?) ?? 0).compareTo(
+        (a['consecutive_absent'] as int?) ?? 0,
+      );
+      if (sCmp != 0) return sCmp;
+      return ((a['month_percentage'] as num?) ?? 100.0).compareTo(
+        (b['month_percentage'] as num?) ?? 100.0,
+      );
+    });
+    dueMilestonePopups.sort(
+      (a, b) => ((b['milestone'] as int?) ?? 0).compareTo(
+        (a['milestone'] as int?) ?? 0,
+      ),
+    );
+
+    return <String, dynamic>{
+      'alerts': allAlerts,
+      'due_milestones': dueMilestonePopups,
+      'month_prefix': currentMonthPrefix,
+    };
+  }
+
+  Future<bool> _canTeacherRecordAttendanceForClassOnDate({
+    required _TeacherSessionContext ctx,
+    required String schoolRef,
+    required String classId,
+    required String attendanceDate,
+  }) async {
+    if (ctx.isAdmin) return true;
+    final cleanCid = classId.trim();
+    if (cleanCid.isEmpty) return false;
+    final access = await _computeAttendanceEntryAccessForDate(
+      ctx: ctx,
+      targetDateIso: attendanceDate,
+    );
+    final allowed = access['allowed_class_ids'];
+    if (allowed is List) {
+      return allowed.map((e) => '$e'.trim()).contains(cleanCid);
+    }
+    return false;
+  }
+
   /// Standard of a class row: '0' for Balvatika, '1'..'12' for a standard,
   /// '' when it cannot be determined (then only exact classes are allowed).
   static String _classStandardKey(Map<String, dynamic> c) {
@@ -2008,6 +3139,53 @@ class SupabaseClient {
     if (up.contains('BAL') || raw.contains('બાલ')) return '0';
     final m = RegExp(r'\d{1,2}').firstMatch(raw);
     return m?.group(0) ?? '';
+  }
+
+  /// Reads a school-scoped collection through the shared 15-minute query cache
+  /// (`$table|school_ref=$schoolRef|in=`) so Attendance, Reports, Leave, and
+  /// Result screens share a single Firestore read per session.
+  Future<List<Map<String, dynamic>>> _cachedSchoolTableRows(
+    String table,
+    String schoolRef,
+  ) async {
+    final cleanRef = schoolRef.trim();
+    if (cleanRef.isEmpty) return <Map<String, dynamic>>[];
+    final cacheKey = '$table|school_ref=$cleanRef|in=';
+    final now = DateTime.now();
+    final ttlSec = FirestoreQueryBuilder._cacheTtlSecondsForTable(table);
+    final cached = FirestoreQueryBuilder._queryCache[cacheKey];
+    if (cached != null && now.difference(cached.ts).inSeconds < ttlSec) {
+      return cached.rows.map((r) => Map<String, dynamic>.from(r)).toList();
+    }
+    final gen = FirestoreQueryBuilder._generationOf(table);
+    var pending = FirestoreQueryBuilder._inFlightReads[cacheKey];
+    if (pending == null) {
+      pending = _db
+          .collection(table)
+          .where('school_ref', isEqualTo: cleanRef)
+          .get()
+          .then((snap) => snap.docs.map((doc) {
+                final data = Map<String, dynamic>.from(doc.data());
+                data['id'] ??= doc.id;
+                FirestoreQueryBuilder._applyTableSqlDefaults(table, data);
+                FirestoreQueryBuilder._lastWrittenPayloadHash[
+                    '$table/${doc.id}'] =
+                    FirestoreQueryBuilder._canonicalRowSignature(data);
+                return data;
+              }).toList());
+      FirestoreQueryBuilder._inFlightReads[cacheKey] = pending;
+      pending.whenComplete(() {
+        if (identical(FirestoreQueryBuilder._inFlightReads[cacheKey], pending)) {
+          FirestoreQueryBuilder._inFlightReads.remove(cacheKey);
+        }
+      }).ignore();
+    }
+    final rows = await pending;
+    if (gen == FirestoreQueryBuilder._generationOf(table)) {
+      FirestoreQueryBuilder._pruneCacheIfLarge();
+      FirestoreQueryBuilder._queryCache[cacheKey] = (ts: now, rows: rows);
+    }
+    return rows.map((r) => Map<String, dynamic>.from(r)).toList();
   }
 
   /// Reads one master document through the shared query cache (same key
@@ -2196,7 +3374,7 @@ class SupabaseClient {
   Future<String> _requireSchoolWriteAccess({
     String explicitSchoolRef = '',
   }) async {
-    final ctx = await _resolveCurrentTeacherContext(forceRefresh: true);
+    final ctx = await _resolveCurrentTeacherContext();
     if (ctx == null) {
       if (explicitSchoolRef.trim().isNotEmpty) {
         final sSnap = await _db
@@ -2226,7 +3404,9 @@ class SupabaseClient {
       );
     }
 
-    final school = ctx.schoolRow;
+    final school =
+        (await _cachedDocData('schools', ctx.schoolRef, ttlSeconds: 60)) ??
+            ctx.schoolRow;
     if (school['is_active'] != true) {
       throw const PostgrestException(
         message: 'SCHOOL_INACTIVE: this school is deactivated',
@@ -2255,6 +3435,16 @@ class SupabaseClient {
     String schoolRef,
   ) async {
     final ctx = await _resolveCurrentTeacherContext();
+    final rowClassId = '${row['class_id'] ?? ''}'.trim();
+    if (ctx != null &&
+        rowClassId.isNotEmpty &&
+        !ctx.canManageClassStudents(rowClassId)) {
+      throw const PostgrestException(
+        message:
+            'માત્ર જે-તે વર્ગના વર્ગ શિક્ષક (Class Teacher) અથવા School Admin જ આ વર્ગમાં વિદ્યાર્થી ઉમેરી કે સુધારી શકે છે. વિષય શિક્ષક (Subject Teacher) વિદ્યાર્થી ઉમેરી શકતા નથી.',
+        code: '42501',
+      );
+    }
     final schoolType = '${ctx?.schoolRow['school_type'] ?? 'mixed'}'
         .trim()
         .toLowerCase();
@@ -2346,11 +3536,20 @@ class SupabaseClient {
         code: '23502',
       );
     }
-    if (ctx != null && !ctx.isAdmin && classId.isNotEmpty && !ctx.canRecordAttendance(classId)) {
-      throw const PostgrestException(
-        message: 'તમે માત્ર તમારા ધોરણના વર્ગો (બધા વિભાગ) ની જ હાજરી પૂરી શકો છો. અન્ય ધોરણની હાજરી માટે School Admin નો સંપર્ક કરો.',
-        code: '42501',
+    if (ctx != null && !ctx.isAdmin && classId.isNotEmpty) {
+      final canRecord = await _canTeacherRecordAttendanceForClassOnDate(
+        ctx: ctx,
+        schoolRef: schoolRef,
+        classId: classId,
+        attendanceDate: attendanceDate,
       );
+      if (!canRecord) {
+        throw const PostgrestException(
+          message:
+              'તમને આ તારીખે આ વર્ગની હાજરી પૂરવાની પરવાનગી નથી (અથવા રજાનો ચાર્જ સમયગાળો પૂર્ણ થઈ ગયો છે). School Admin નો સંપર્ક કરો.',
+          code: '42501',
+        );
+      }
     }
 
     final today = _indiaTodayIso();
@@ -2490,10 +3689,13 @@ class SupabaseClient {
     final teacherId = '${row['teacher_id'] ?? ctx?.teacherId ?? ''}'.trim();
     if (schoolRef.isEmpty || teacherId.isEmpty) return;
 
-    final existingLeaves = await from('teacher_leaves')
-        .select()
-        .eq('school_ref', schoolRef)
-        .eq('teacher_id', teacherId);
+    final allSchoolLeaves = await _cachedSchoolTableRows(
+      'teacher_leaves',
+      schoolRef,
+    );
+    final existingLeaves = allSchoolLeaves
+        .where((l) => '${l['teacher_id'] ?? ''}'.trim() == teacherId)
+        .toList();
 
     if (isInsert &&
         recordSource == 'teacher_application' &&
@@ -2512,6 +3714,120 @@ class SupabaseClient {
       }
     }
 
+    final startDate = DateTime.tryParse('${row['start_date'] ?? ''}');
+    final endDate = DateTime.tryParse('${row['end_date'] ?? ''}');
+    if (startDate == null || endDate == null || endDate.isBefore(startDate)) {
+      throw const PostgrestException(message: 'Leave dates are invalid.');
+    }
+    final startIso = _extractIndiaDateIsoFromAny(row['start_date']);
+    final endIso = _extractIndiaDateIsoFromAny(row['end_date']);
+    final currentRowId = '${row['id'] ?? ''}'.trim();
+
+    final leaveData = row['leave_data'] is Map
+        ? Map<String, dynamic>.from(row['leave_data'] as Map)
+        : <String, dynamic>{};
+    final chargeTeacherId =
+        '${leaveData['charge_teacher_id'] ?? row['charge_teacher_id'] ?? ''}'
+            .trim();
+
+    if (chargeTeacherId.isNotEmpty && chargeTeacherId == teacherId) {
+      throw const PostgrestException(
+        message: 'અરજદાર શિક્ષક પોતાને જ વર્ગ ચાર્જ સોંપી શકે નહીં.',
+        code: '23514',
+      );
+    }
+
+    if (startIso.isNotEmpty && endIso.isNotEmpty) {
+      final overlappingSchoolLeaves = <Map<String, dynamic>>[];
+      for (final l in allSchoolLeaves) {
+        final lid = '${l['id'] ?? ''}'.trim();
+        if (currentRowId.isNotEmpty && lid == currentRowId) continue;
+        final lStatus = '${l['status'] ?? 'pending'}'.trim().toLowerCase();
+        if (lStatus != 'pending' && lStatus != 'approved') continue;
+        final lStart = _extractIndiaDateIsoFromAny(l['start_date']);
+        final lEnd = _extractIndiaDateIsoFromAny(l['end_date']);
+        if (lStart.isEmpty || lEnd.isEmpty) continue;
+        if (lStart.compareTo(endIso) <= 0 && lEnd.compareTo(startIso) >= 0) {
+          overlappingSchoolLeaves.add(l);
+        }
+      }
+
+      if (isInsert && recordSource == 'teacher_application') {
+        for (final l in overlappingSchoolLeaves) {
+          if ('${l['teacher_id'] ?? ''}'.trim() == teacherId) {
+            final lStart = _extractIndiaDateIsoFromAny(l['start_date']);
+            final lEnd = _extractIndiaDateIsoFromAny(l['end_date']);
+            throw PostgrestException(
+              message:
+                  'આ તારીખ ($lStart થી $lEnd) દરમિયાન તમારી રજા અરજી પહેલેથી જ નોંધાયેલી છે.',
+              code: '23514',
+            );
+          }
+        }
+      }
+
+      if (chargeTeacherId.isNotEmpty) {
+        // Build charge map on overlapping dates: onLeaveTeacherId -> chargeTeacherId
+        final chargeMap = <String, String>{};
+        final leaveByTeacher = <String, Map<String, dynamic>>{};
+        for (final l in overlappingSchoolLeaves) {
+          final tId = '${l['teacher_id'] ?? ''}'.trim();
+          if (tId.isEmpty) continue;
+          leaveByTeacher[tId] = l;
+          final ld = l['leave_data'] is Map
+              ? Map<String, dynamic>.from(l['leave_data'] as Map)
+              : <String, dynamic>{};
+          final cId =
+              '${ld['charge_teacher_id'] ?? l['charge_teacher_id'] ?? ''}'
+                  .trim();
+          if (cId.isNotEmpty) chargeMap[tId] = cId;
+        }
+
+        // 1. Check if [chargeTeacherId] gave charge (directly or transitively) to [teacherId]
+        var cursor = chargeTeacherId;
+        final seen = <String>{};
+        var gaveChargeToApplicant = false;
+        while (chargeMap.containsKey(cursor) && seen.add(cursor)) {
+          final next = chargeMap[cursor]!;
+          if (next == teacherId) {
+            gaveChargeToApplicant = true;
+            break;
+          }
+          cursor = next;
+        }
+        if (gaveChargeToApplicant) {
+          final conflictLeave = leaveByTeacher[chargeTeacherId];
+          final ld = conflictLeave?['leave_data'] is Map
+              ? Map<String, dynamic>.from(conflictLeave!['leave_data'] as Map)
+              : <String, dynamic>{};
+          final tName = '${ld['teacher_name'] ?? 'પસંદ કરેલ શિક્ષક'}'.trim();
+          throw PostgrestException(
+            message:
+                'આ તારીખે "$tName" એ પોતે રજા મૂકીને તમને વર્ગ ચાર્જ સોંપેલ છે, તેથી તમે તેમને સામો ચાર્જ સોંપી શકો નહીં. કૃપા કરીને હાજર રહેનાર અન્ય શિક્ષકને ચાર્જ સોંપો (જેથી તેમને બંને/ત્રણેય વર્ગનો ચાર્જ મળશે).',
+            code: '23514',
+          );
+        }
+
+        // 2. Check if [chargeTeacherId] is already on leave during [startIso..endIso]
+        if (leaveByTeacher.containsKey(chargeTeacherId)) {
+          final conflictLeave = leaveByTeacher[chargeTeacherId]!;
+          final ld = conflictLeave['leave_data'] is Map
+              ? Map<String, dynamic>.from(conflictLeave['leave_data'] as Map)
+              : <String, dynamic>{};
+          final tName = '${ld['teacher_name'] ?? 'પસંદ કરેલ શિક્ષક'}'.trim();
+          final lStart = _extractIndiaDateIsoFromAny(
+            conflictLeave['start_date'],
+          );
+          final lEnd = _extractIndiaDateIsoFromAny(conflictLeave['end_date']);
+          throw PostgrestException(
+            message:
+                'આ તારીખે "$tName" પોતે રજા પર છે ($lStart થી $lEnd). રજા પર રહેલા શિક્ષકને વર્ગ ચાર્જ સોંપી શકાય નહીં; કૃપા કરીને હાજર રહેનાર અન્ય શિક્ષક પસંદ કરો.',
+            code: '23514',
+          );
+        }
+      }
+    }
+
     final typeLower = '${row['leave_type'] ?? ''}'.trim().toLowerCase();
     final isCl =
         typeLower.contains('(cl)') ||
@@ -2521,16 +3837,6 @@ class SupabaseClient {
         typeLower.contains('મરજિયાત') || typeLower.contains('marajiyat');
     final isValtar = typeLower.contains('વળતર') || typeLower.contains('valtar');
     if (!isCl && !isMarajiyat && !isValtar) return;
-
-    final startDate = DateTime.tryParse('${row['start_date'] ?? ''}');
-    final endDate = DateTime.tryParse('${row['end_date'] ?? ''}');
-    if (startDate == null || endDate == null || endDate.isBefore(startDate)) {
-      throw const PostgrestException(message: 'Leave dates are invalid.');
-    }
-
-    final leaveData = row['leave_data'] is Map
-        ? Map<String, dynamic>.from(row['leave_data'] as Map)
-        : <String, dynamic>{};
     final requested =
         double.tryParse('${leaveData['total_days'] ?? ''}') ??
         (endDate.difference(startDate).inDays + 1).toDouble();
@@ -2720,6 +4026,27 @@ class SupabaseClient {
           return ctx?.isAdmin == true;
         }
 
+      case 'psm_get_attendance_entry_access':
+        {
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null) {
+            return <String, dynamic>{
+              'permission_mode': 'subject_and_class_teachers',
+              'attendance_date': _indiaTodayIso(),
+              'classes': <Map<String, dynamic>>[],
+              'allowed_class_ids': <String>[],
+              'class_teacher_ids': <String>[],
+              'role_by_class_id': <String, String>{},
+              'in_charge_info_by_class_id': <String, Map<String, dynamic>>{},
+            };
+          }
+          final reqDate = '${p['p_attendance_date'] ?? _indiaTodayIso()}'.trim();
+          return _computeAttendanceEntryAccessForDate(
+            ctx: ctx,
+            targetDateIso: reqDate,
+          );
+        }
+
       case 'psm_attendance_class_ids':
         {
           // null = whole school (admin); otherwise the class ids the teacher
@@ -2728,6 +4055,16 @@ class SupabaseClient {
           if (ctx == null) return <String>[];
           if (ctx.isAdmin) return null;
           return ctx.attendanceClassIds.toList();
+        }
+
+      case 'psm_class_teacher_class_ids':
+        {
+          // null = whole school (admin); otherwise the exact class ids where
+          // this teacher is the Class Teacher (never subject-only classes).
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null) return <String>[];
+          if (ctx.isAdmin) return null;
+          return ctx.classTeacherClassIds.toList();
         }
 
       case 'can_access_class':
@@ -2750,19 +4087,19 @@ class SupabaseClient {
         {
           final ctx = await _resolveCurrentTeacherContext();
           if (ctx == null) return <Map<String, dynamic>>[];
-          final snap = await _db
-              .collection('school_teachers')
-              .where('school_ref', isEqualTo: ctx.schoolRef)
-              .get();
+          final teacherRows = await _cachedSchoolTableRows(
+            'school_teachers',
+            ctx.schoolRef,
+          );
           final out = <Map<String, dynamic>>[];
-          for (final doc in snap.docs) {
-            final r = doc.data();
+          for (final r in teacherRows) {
             if (r['is_active'] != true) continue;
             final role = '${r['role'] ?? 'teacher'}'.trim().toLowerCase();
             if (role == 'admin' || role == 'developer') continue;
             out.add(<String, dynamic>{
-              'id': '${r['id'] ?? doc.id}',
+              'id': '${r['id'] ?? ''}',
               'teacher_name': '${r['teacher_name'] ?? ''}',
+              'mobile': '${r['mobile'] ?? ''}',
               'role': '${r['role'] ?? 'teacher'}',
               'is_active': true,
               'allowed_classes': r['allowed_classes'] is List
@@ -2784,18 +4121,18 @@ class SupabaseClient {
           // The leave applicant directory is deliberately Admin-only. It reads
           // only this school's teacher display names and class metadata.
           if (ctx == null || !ctx.isAdmin) return <Map<String, dynamic>>[];
-          final snap = await _db
-              .collection('school_teachers')
-              .where('school_ref', isEqualTo: ctx.schoolRef)
-              .get();
+          final teacherRows = await _cachedSchoolTableRows(
+            'school_teachers',
+            ctx.schoolRef,
+          );
           final out = <Map<String, dynamic>>[];
-          for (final doc in snap.docs) {
-            final row = doc.data();
+          for (final row in teacherRows) {
             final role = '${row['role'] ?? 'teacher'}'.trim().toLowerCase();
             if (role == 'admin' || role == 'developer') continue;
             out.add(<String, dynamic>{
-              'id': '${row['id'] ?? doc.id}',
+              'id': '${row['id'] ?? ''}',
               'teacher_name': '${row['teacher_name'] ?? ''}',
+              'mobile': '${row['mobile'] ?? ''}',
               'role': role.isEmpty ? 'teacher' : role,
               'is_active': row['is_active'] == true,
               'allowed_classes': row['allowed_classes'] is List
@@ -2881,16 +4218,15 @@ class SupabaseClient {
         {
           final ctx = await _resolveCurrentTeacherContext();
           if (ctx == null) return <Map<String, dynamic>>[];
-          final snap = await _db
-              .collection('school_teachers')
-              .where('school_ref', isEqualTo: ctx.schoolRef)
-              .get();
+          final teacherRows = await _cachedSchoolTableRows(
+            'school_teachers',
+            ctx.schoolRef,
+          );
           final out = <Map<String, dynamic>>[];
-          for (final doc in snap.docs) {
-            final r = doc.data();
+          for (final r in teacherRows) {
             if (r['is_active'] != true) continue;
             out.add(<String, dynamic>{
-              'id': '${r['id'] ?? doc.id}',
+              'id': '${r['id'] ?? ''}',
               'teacher_name': '${r['teacher_name'] ?? ''}',
               'role': '${r['role'] ?? 'teacher'}',
             });
@@ -2907,14 +4243,13 @@ class SupabaseClient {
         {
           final ctx = await _resolveCurrentTeacherContext();
           if (ctx == null) return <Map<String, dynamic>>[];
-          final snap = await _db
-              .collection('school_classes')
-              .where('school_ref', isEqualTo: ctx.schoolRef)
-              .get();
-          final out = snap.docs.map((doc) {
-            final c = doc.data();
+          final classRows = await _cachedSchoolTableRows(
+            'school_classes',
+            ctx.schoolRef,
+          );
+          final out = classRows.map((c) {
             return <String, dynamic>{
-              'id': '${c['id'] ?? doc.id}',
+              'id': '${c['id'] ?? ''}',
               'label': '${c['label'] ?? ''}',
               'class_key': '${c['class_key'] ?? ''}',
               'sheet_name': '${c['sheet_name'] ?? ''}',
@@ -2958,6 +4293,12 @@ class SupabaseClient {
             'is_active': s['is_active'] == true,
             'is_blocked': s['is_blocked'] == true,
             'validity_date': s['validity_date'],
+            'disabled_modules': s['disabled_modules'] is Iterable
+                ? (s['disabled_modules'] as Iterable)
+                      .map((e) => '$e'.trim().toLowerCase())
+                      .where((v) => v.isNotEmpty)
+                      .toList()
+                : const <String>[],
           };
         }
 
@@ -3306,6 +4647,39 @@ class SupabaseClient {
           return _saveSchoolResultGradeSettings(schoolRef, grades);
         }
 
+      case 'psm_school_active_leave_charges':
+        {
+          final schoolRef = await _requireSchoolReadAccess();
+          final allLeaves = await _cachedSchoolTableRows(
+            'teacher_leaves',
+            schoolRef,
+          );
+          final out = <Map<String, dynamic>>[];
+          for (final l in allLeaves) {
+            final status = '${l['status'] ?? 'pending'}'.trim().toLowerCase();
+            if (status != 'pending' && status != 'approved') continue;
+            final ld = l['leave_data'] is Map
+                ? Map<String, dynamic>.from(l['leave_data'] as Map)
+                : <String, dynamic>{};
+            out.add(<String, dynamic>{
+              'id': '${l['id'] ?? ''}',
+              'teacher_id': '${l['teacher_id'] ?? ''}',
+              'start_date': _extractIndiaDateIsoFromAny(l['start_date']),
+              'end_date': _extractIndiaDateIsoFromAny(l['end_date']),
+              'status': status,
+              'leave_type': '${l['leave_type'] ?? ''}',
+              'teacher_name': '${ld['teacher_name'] ?? ''}',
+              'teacher_class': '${ld['teacher_class'] ?? ''}',
+              'charge_teacher_id':
+                  '${ld['charge_teacher_id'] ?? l['charge_teacher_id'] ?? ''}',
+              'charge_teacher_name':
+                  '${ld['charge_teacher_name'] ?? l['charge_teacher_name'] ?? ''}',
+              'charge_teacher_class': '${ld['charge_teacher_class'] ?? ''}',
+            });
+          }
+          return out;
+        }
+
       case 'psm_get_or_create_teacher_leave_report_snapshot':
         {
           final leaveId = '${p['p_leave_id'] ?? ''}'.trim();
@@ -3398,18 +4772,17 @@ class SupabaseClient {
           );
           final targetValtarPeriod = periodStartFor(targetStart, valtarStart);
 
-          final allLeaves = await _db
-              .collection('teacher_leaves')
-              .where('school_ref', isEqualTo: schoolRef)
-              .get();
+          final allLeaves = await _cachedSchoolTableRows(
+            'teacher_leaves',
+            schoolRef,
+          );
 
           double clUsed = 0;
           double valtarUsed = 0;
           double marajiyatUsed = 0;
 
-          for (final doc in allLeaves.docs) {
-            final l = doc.data();
-            final lid = '${l['id'] ?? doc.id}'.trim();
+          for (final l in allLeaves) {
+            final lid = '${l['id'] ?? ''}'.trim();
             if (lid == leaveId) continue;
             if ('${l['teacher_id'] ?? ''}'.trim() != teacherId) continue;
             if ('${l['status'] ?? ''}'.trim().toLowerCase() != 'approved')
@@ -3703,7 +5076,511 @@ class SupabaseClient {
             );
           }
           await _db.collection('teacher_leaves').doc(leaveId).delete();
+          FirestoreQueryBuilder.invalidateCache('teacher_leaves');
           return <String, dynamic>{'success': true, 'deleted_id': leaveId};
+        }
+
+      case 'psm_admin_delete_leave_with_password':
+        {
+          final schoolRef = await _requireSchoolWriteAccess();
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null || !ctx.isAdmin) {
+            throw const PostgrestException(
+              message: 'માત્ર School Admin જ પાસવર્ડથી રજા રેકોર્ડ કાઢી શકે છે.',
+            );
+          }
+          final leaveId = '${p['p_leave_id'] ?? ''}'.trim();
+          final adminPassword = '${p['p_admin_password'] ?? ''}'.trim();
+          if (leaveId.isEmpty) {
+            throw const PostgrestException(
+              message: 'રજા રેકોર્ડ ID મળ્યો નથી.',
+            );
+          }
+          if (adminPassword.isEmpty) {
+            throw const PostgrestException(
+              message: 'કૃપા કરીને School Admin પાસવર્ડ દાખલ કરો.',
+            );
+          }
+
+          final leaveSnap =
+              await _db.collection('teacher_leaves').doc(leaveId).get();
+          if (!leaveSnap.exists || leaveSnap.data() == null) {
+            throw const PostgrestException(
+              message: 'આ રજા રેકોર્ડ મળ્યો નથી અથવા પહેલેથી જ કાઢી નાખવામાં આવ્યો છે.',
+            );
+          }
+          final leaveRow = leaveSnap.data()!;
+          if ('${leaveRow['school_ref'] ?? ''}'.trim() != schoolRef) {
+            throw const PostgrestException(
+              message: 'આ રજા રેકોર્ડ તમારી શાળાનો નથી.',
+            );
+          }
+
+          // Verify School Admin password against the school's Admin teacher row or Firebase Auth
+          final teacherRows = await _cachedSchoolTableRows(
+            'school_teachers',
+            schoolRef,
+          );
+          Map<String, dynamic>? adminRow;
+          for (final t in teacherRows) {
+            if ('${t['id'] ?? ''}'.trim() == ctx.teacherId) {
+              adminRow = t;
+              break;
+            }
+          }
+          adminRow ??= teacherRows.cast<Map<String, dynamic>?>().firstWhere(
+            (t) => '${t?['role'] ?? ''}'.trim().toLowerCase() == 'admin',
+            orElse: () => null,
+          );
+
+          var passwordVerified = false;
+          final storedPlain =
+              '${adminRow?['password_plain'] ?? adminRow?['password'] ?? ''}'
+                  .trim();
+          if (storedPlain.isNotEmpty && storedPlain == adminPassword) {
+            passwordVerified = true;
+          }
+          if (!passwordVerified) {
+            final loginEmail =
+                '${adminRow?['login_email'] ?? auth.currentUser?.email ?? ''}'
+                    .trim();
+            if (loginEmail.isNotEmpty) {
+              try {
+                final helperAuth = await functions._getHelperAuth();
+                final normalizedPwd = _toFirebasePassword(adminPassword);
+                try {
+                  await helperAuth.signInWithEmailAndPassword(
+                    email: loginEmail,
+                    password: adminPassword,
+                  );
+                  passwordVerified = true;
+                } catch (_) {
+                  if (normalizedPwd != adminPassword) {
+                    await helperAuth.signInWithEmailAndPassword(
+                      email: loginEmail,
+                      password: normalizedPwd,
+                    );
+                    passwordVerified = true;
+                  }
+                }
+                try {
+                  await helperAuth.signOut();
+                } catch (_) {}
+              } catch (_) {
+                passwordVerified = false;
+              }
+            }
+          }
+
+          if (!passwordVerified) {
+            throw const PostgrestException(
+              message: 'School Admin પાસવર્ડ ખોટો છે. કૃપા કરીને સાચો પાસવર્ડ દાખલ કરો.',
+            );
+          }
+
+          final targetTeacherId = '${leaveRow['teacher_id'] ?? ''}'.trim();
+          await _db.collection('teacher_leaves').doc(leaveId).delete();
+          try {
+            await _db
+                .collection('teacher_leave_report_snapshots')
+                .doc(leaveId)
+                .delete();
+          } catch (_) {}
+          try {
+            final snapQuery = await _db
+                .collection('teacher_leave_report_snapshots')
+                .where('school_ref', isEqualTo: schoolRef)
+                .get();
+            for (final doc in snapQuery.docs) {
+              final d = doc.data();
+              final docTid = '${d['teacher_id'] ?? ''}'.trim();
+              if (docTid.isEmpty ||
+                  targetTeacherId.isEmpty ||
+                  docTid == targetTeacherId) {
+                await doc.reference.delete();
+              }
+            }
+          } catch (_) {}
+
+          FirestoreQueryBuilder.invalidateCache('teacher_leaves');
+          FirestoreQueryBuilder.invalidateCache(
+            'teacher_leave_report_snapshots',
+          );
+          return <String, dynamic>{
+            'deleted': true,
+            'leave_id': leaveId,
+            'teacher_id': targetTeacherId,
+          };
+        }
+
+      case 'psm_admin_promote_students_with_password':
+        {
+          final schoolRef = await _requireSchoolWriteAccess();
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null || !ctx.isAdmin) {
+            throw const PostgrestException(
+              message: 'માત્ર School Admin જ વાર્ષિક વર્ગ બઢતી કરી શકે છે.',
+            );
+          }
+          final adminPassword = '${p['p_admin_password'] ?? ''}'.trim();
+          if (adminPassword.isEmpty) {
+            throw const PostgrestException(
+              message: 'કૃપા કરીને School Admin પાસવર્ડ દાખલ કરો.',
+            );
+          }
+          final teacherRows = await _cachedSchoolTableRows(
+            'school_teachers',
+            schoolRef,
+          );
+          Map<String, dynamic>? adminRow;
+          for (final t in teacherRows) {
+            if ('${t['id'] ?? ''}'.trim() == ctx.teacherId) {
+              adminRow = t;
+              break;
+            }
+          }
+          adminRow ??= teacherRows.cast<Map<String, dynamic>?>().firstWhere(
+            (t) => '${t?['role'] ?? ''}'.trim().toLowerCase() == 'admin',
+            orElse: () => null,
+          );
+          var passwordVerified = false;
+          final storedPlain =
+              '${adminRow?['password_plain'] ?? adminRow?['password'] ?? ''}'
+                  .trim();
+          if (storedPlain.isNotEmpty && storedPlain == adminPassword) {
+            passwordVerified = true;
+          }
+          if (!passwordVerified) {
+            final loginEmail =
+                '${adminRow?['login_email'] ?? auth.currentUser?.email ?? ''}'
+                    .trim();
+            if (loginEmail.isNotEmpty) {
+              try {
+                final helperAuth = await functions._getHelperAuth();
+                final normalizedPwd = _toFirebasePassword(adminPassword);
+                try {
+                  await helperAuth.signInWithEmailAndPassword(
+                    email: loginEmail,
+                    password: adminPassword,
+                  );
+                  passwordVerified = true;
+                } catch (_) {
+                  if (normalizedPwd != adminPassword) {
+                    await helperAuth.signInWithEmailAndPassword(
+                      email: loginEmail,
+                      password: normalizedPwd,
+                    );
+                    passwordVerified = true;
+                  }
+                }
+                try {
+                  await helperAuth.signOut();
+                } catch (_) {}
+              } catch (_) {
+                passwordVerified = false;
+              }
+            }
+          }
+          if (!passwordVerified) {
+            throw const PostgrestException(
+              message: 'School Admin પાસવર્ડ ખોટો છે. કૃપા કરીને સાચો પાસવર્ડ દાખલ કરો.',
+            );
+          }
+
+          final rawMappings = p['p_class_mappings'];
+          if (rawMappings is! Map || rawMappings.isEmpty) {
+            throw const PostgrestException(
+              message: 'વર્ગ બઢતીનું મેપિંગ પસંદ કરો.',
+            );
+          }
+          final mappings = <String, String>{};
+          rawMappings.forEach((k, v) {
+            final srcId = '$k'.trim();
+            final dstId = '$v'.trim();
+            if (srcId.isNotEmpty && dstId.isNotEmpty) {
+              mappings[srcId] = dstId;
+            }
+          });
+          final rawExcluded = p['p_exclude_student_ids'];
+          final excludedIds = rawExcluded is Iterable
+              ? rawExcluded.map((e) => '$e'.trim()).where((s) => s.isNotEmpty).toSet()
+              : <String>{};
+          final academicYearNote = '${p['p_academic_year_label'] ?? ''}'.trim();
+
+          final allClasses = await _cachedSchoolTableRows(
+            'school_classes',
+            schoolRef,
+          );
+          final validClassIds = <String>{
+            for (final c in allClasses)
+              if (c['is_active'] != false) '${c['id'] ?? ''}'.trim(),
+          };
+
+          final studentSnap = await _db
+              .collection('students')
+              .where('school_ref', isEqualTo: schoolRef)
+              .get();
+          final nowIso = DateTime.now().toUtc().toIso8601String();
+          final todayIso = _indiaTodayIso();
+
+          var promotedCount = 0;
+          var passedOutCount = 0;
+          var keptCount = 0;
+          var batch = _db.batch();
+          var ops = 0;
+
+          Future<void> flushBatch() async {
+            if (ops > 0) {
+              await batch.commit();
+              batch = _db.batch();
+              ops = 0;
+            }
+          }
+
+          for (final doc in studentSnap.docs) {
+            final st = doc.data();
+            final sid = '${st['id'] ?? doc.id}'.trim();
+            final isAct = st['is_active'] == true &&
+                '${st['leaving_date'] ?? ''}'.trim().isEmpty &&
+                '${st['exit_date'] ?? ''}'.trim().isEmpty;
+            if (!isAct) continue;
+            final srcClassId = '${st['class_id'] ?? ''}'.trim();
+            if (!mappings.containsKey(srcClassId)) continue;
+            if (excludedIds.contains(sid)) {
+              keptCount++;
+              continue;
+            }
+            final target = mappings[srcClassId]!;
+            if (target == '__KEEP__' || target == srcClassId) {
+              keptCount++;
+              continue;
+            }
+            if (target == '__PASS_OUT__') {
+              final reason = academicYearNote.isEmpty
+                  ? 'Passed Out / ઉતીર્ણ (વાર્ષિક વર્ગ બઢતી)'
+                  : 'Passed Out / ઉતીર્ણ ($academicYearNote)';
+              batch.set(
+                doc.reference,
+                <String, dynamic>{
+                  'is_active': false,
+                  'exit_date': todayIso,
+                  'exit_reason': reason,
+                  'promoted_at': nowIso,
+                  'updated_at': nowIso,
+                },
+                fs.SetOptions(merge: true),
+              );
+              passedOutCount++;
+              ops++;
+            } else if (validClassIds.contains(target)) {
+              batch.set(
+                doc.reference,
+                <String, dynamic>{
+                  'class_id': target,
+                  'promoted_from_class_id': srcClassId,
+                  'promoted_at': nowIso,
+                  'updated_at': nowIso,
+                },
+                fs.SetOptions(merge: true),
+              );
+              promotedCount++;
+              ops++;
+            } else {
+              keptCount++;
+            }
+            if (ops >= 400) {
+              await flushBatch();
+            }
+          }
+          await flushBatch();
+          FirestoreQueryBuilder.invalidateCache('students');
+          return <String, dynamic>{
+            'ok': true,
+            'promoted_count': promotedCount,
+            'passed_out_count': passedOutCount,
+            'kept_count': keptCount,
+          };
+        }
+
+      case 'psm_compute_absence_streaks_and_alerts':
+        {
+          final schoolRef = await _requireSchoolReadAccess();
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null) {
+            throw const PostgrestException(message: 'Please sign in again.');
+          }
+          final filterClassId = '${p['p_class_id'] ?? ''}'.trim();
+          final roleScope = ctx.isAdmin ? 'admin' : 'teacher';
+          return _computeStudentAbsenceStreaksAndAlerts(
+            schoolRef: schoolRef,
+            ctx: ctx,
+            filterClassId: filterClassId,
+            roleScope: roleScope,
+          );
+        }
+
+      case 'psm_ack_absence_alert':
+        {
+          final schoolRef = await _requireSchoolWriteAccess();
+          final rawKeys = p['p_ack_keys'];
+          final keys = rawKeys is Iterable
+              ? rawKeys.map((e) => '$e'.trim()).where((s) => s.isNotEmpty).toList()
+              : <String>[];
+          final nowIso = DateTime.now().toUtc().toIso8601String();
+          var batch = _db.batch();
+          var ops = 0;
+          for (final k in keys) {
+            batch.set(
+              _db.collection('student_absence_alert_acks').doc(k),
+              <String, dynamic>{
+                'id': k,
+                'school_ref': schoolRef,
+                'acked_at': nowIso,
+              },
+              fs.SetOptions(merge: true),
+            );
+            ops++;
+            if (ops >= 400) {
+              await batch.commit();
+              batch = _db.batch();
+              ops = 0;
+            }
+          }
+          if (ops > 0) await batch.commit();
+          FirestoreQueryBuilder.invalidateCache('student_absence_alert_acks');
+          return <String, dynamic>{'ok': true, 'acked': keys.length};
+        }
+
+      case 'psm_get_academic_calendar':
+        {
+          final schoolRef = await _requireSchoolReadAccess();
+          final rows = await _cachedSchoolTableRows(
+            'school_academic_events',
+            schoolRef,
+          );
+          final list = rows
+              .where((r) => r['is_active'] != false)
+              .map((r) => Map<String, dynamic>.from(r))
+              .toList();
+          list.sort(
+            (a, b) => '${a['event_date'] ?? ''}'.compareTo(
+              '${b['event_date'] ?? ''}',
+            ),
+          );
+          return list;
+        }
+
+      case 'psm_save_academic_calendar_event':
+        {
+          final schoolRef = await _requireSchoolWriteAccess();
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null || !ctx.isAdmin) {
+            throw const PostgrestException(
+              message: 'માત્ર School Admin જ શૈક્ષણિક કેલેન્ડર ઉમેરી/સુધારી શકે છે.',
+            );
+          }
+          final eventDate = '${p['p_event_date'] ?? ''}'.trim();
+          final title = '${p['p_title'] ?? ''}'.trim();
+          if (eventDate.isEmpty || title.isEmpty) {
+            throw const PostgrestException(
+              message: 'તારીખ અને કાર્યક્રમનું નામ જરૂરી છે.',
+            );
+          }
+          final id = '${p['p_id'] ?? ''}'.trim().isNotEmpty
+              ? '${p['p_id']}'.trim()
+              : _generateUuid();
+          final nowIso = DateTime.now().toUtc().toIso8601String();
+          final payload = <String, dynamic>{
+            'id': id,
+            'school_ref': schoolRef,
+            'event_date': eventDate,
+            'end_date': '${p['p_end_date'] ?? eventDate}'.trim().isEmpty
+                ? eventDate
+                : '${p['p_end_date']}'.trim(),
+            'title': title,
+            'category': '${p['p_category'] ?? 'પરીક્ષા / Exam'}'.trim(),
+            'notes': '${p['p_notes'] ?? ''}'.trim(),
+            'is_active': true,
+            'updated_by': ctx.teacherId,
+            'updated_at': nowIso,
+          };
+          await _db
+              .collection('school_academic_events')
+              .doc(id)
+              .set(payload, fs.SetOptions(merge: true));
+          FirestoreQueryBuilder.invalidateCache('school_academic_events');
+          return payload;
+        }
+
+      case 'psm_delete_academic_calendar_event':
+        {
+          final schoolRef = await _requireSchoolWriteAccess();
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null || !ctx.isAdmin) {
+            throw const PostgrestException(
+              message: 'માત્ર School Admin જ શૈક્ષણિક કેલેન્ડર કાઢી શકે છે.',
+            );
+          }
+          final id = '${p['p_id'] ?? ''}'.trim();
+          if (id.isNotEmpty) {
+            final snap = await _db.collection('school_academic_events').doc(id).get();
+            if (snap.exists &&
+                '${snap.data()?['school_ref'] ?? ''}'.trim() == schoolRef) {
+              await snap.reference.delete();
+            }
+            FirestoreQueryBuilder.invalidateCache('school_academic_events');
+          }
+          return <String, dynamic>{'deleted': true};
+        }
+
+      case 'psm_get_weekly_meal_menu':
+        {
+          final schoolRef = await _requireSchoolReadAccess();
+          final doc = await _cachedDocData('school_weekly_meal_menus', schoolRef);
+          if (doc == null) {
+            return <String, dynamic>{
+              'enabled': false,
+              'days': <String, dynamic>{},
+            };
+          }
+          return <String, dynamic>{
+            'enabled': doc['enabled'] != false,
+            'days': doc['days'] is Map
+                ? Map<String, dynamic>.from(doc['days'] as Map)
+                : <String, dynamic>{},
+            'updated_at': doc['updated_at'] ?? '',
+          };
+        }
+
+      case 'psm_save_weekly_meal_menu':
+        {
+          final schoolRef = await _requireSchoolWriteAccess();
+          final ctx = await _resolveCurrentTeacherContext();
+          if (ctx == null || !ctx.isAdmin) {
+            throw const PostgrestException(
+              message: 'માત્ર School Admin જ સાપ્તાહિક PM POSHAN અને અલ્પાહાર મેનુ સેટ કરી શકે છે.',
+            );
+          }
+          final enabled = p['p_enabled'] != false;
+          final rawDays = p['p_days'];
+          final days = rawDays is Map
+              ? rawDays.map((k, v) => MapEntry('$k', v))
+              : <String, dynamic>{};
+          final nowIso = DateTime.now().toUtc().toIso8601String();
+          final payload = <String, dynamic>{
+            'id': schoolRef,
+            'school_ref': schoolRef,
+            'enabled': enabled,
+            'days': days,
+            'updated_by': ctx.teacherId,
+            'updated_at': nowIso,
+          };
+          await _db
+              .collection('school_weekly_meal_menus')
+              .doc(schoolRef)
+              .set(payload, fs.SetOptions(merge: true));
+          FirestoreQueryBuilder.invalidateCache('school_weekly_meal_menus');
+          return payload;
         }
 
       case 'psm_restore_disappeared_or_archived_students':
@@ -3876,6 +5753,7 @@ class SupabaseClient {
               .collection('library_settings')
               .doc(schoolRef)
               .set(payload, fs.SetOptions(merge: true));
+          FirestoreQueryBuilder.invalidateCache('library_settings');
           return payload;
         }
 
@@ -4033,6 +5911,10 @@ class SupabaseClient {
               : <String, String>{};
           final newClassEnrollDate = '${p['p_new_class_enroll_date'] ?? ''}'.trim();
           final keepSameTeacher = p['p_keep_same_class_teacher'] != false;
+          final rawTeacherMap = p['p_new_class_teacher_map'];
+          final newClassTeacherMap = rawTeacherMap is Map
+              ? rawTeacherMap.map((k, v) => MapEntry('$k'.trim(), '$v'.trim()))
+              : <String, String>{};
           return _promoteSchoolClasses(
             schoolRef: schoolRef,
             retainedStudentIds: retainedIds,
@@ -4040,6 +5922,7 @@ class SupabaseClient {
             classTargetClassMap: classTargetClassMap,
             newClassEnrollDate: newClassEnrollDate,
             keepSameClassTeacher: keepSameTeacher,
+            newClassTeacherMap: newClassTeacherMap,
           );
         }
 
@@ -4200,14 +6083,22 @@ class SupabaseClient {
 
       case 'psm_get_developer_shared_files':
         {
-          final snap = await _db.collection('developer_shared_files').get();
-          final files = snap.docs
-              .map((d) => <String, dynamic>{
-                    ...d.data(),
-                    'id': d.data()['id'] ?? d.id,
-                  })
-              .where((f) => f['is_active'] != false)
-              .toList();
+          final today = _indiaTodayIso();
+          final rawRows = await from('developer_shared_files').select();
+          final files = <Map<String, dynamic>>[];
+          for (final data in rawRows) {
+            if (data['is_active'] == false) continue;
+            final dispDate = _extractIndiaDateIsoFromAny(
+              data['display_date'] ?? data['created_at'] ?? data['updated_at'],
+            );
+            if (dispDate.isNotEmpty && dispDate.compareTo(today) < 0) {
+              continue;
+            }
+            files.add(<String, dynamic>{
+              ...data,
+              'id': data['id'] ?? '',
+            });
+          }
           files.sort(
             (a, b) => '${b['created_at'] ?? ''}'.compareTo(
               '${a['created_at'] ?? ''}',
@@ -4232,6 +6123,15 @@ class SupabaseClient {
             );
           }
           final meta = Map<String, dynamic>.from(metaDoc.data()!);
+          final dispDate = _extractIndiaDateIsoFromAny(
+            meta['display_date'] ?? meta['created_at'] ?? meta['updated_at'],
+          );
+          if (meta['is_active'] == false ||
+              (dispDate.isNotEmpty && dispDate.compareTo(_indiaTodayIso()) < 0)) {
+            throw const PostgrestException(
+              message: 'This file has expired and is no longer available.',
+            );
+          }
           final assetDocId =
               '${meta['asset_doc_id'] ?? 'dev_shared__$fileId'}'.trim();
           final assetDoc = await _db
@@ -4322,30 +6222,98 @@ class SupabaseClient {
   }
 
   String? _studentAdmissionIso(Map<String, dynamic> s) {
-    for (final key in const <String>['enroll_school', 'enrollment_date', 'admission_date', 'enroll_class']) {
+    final isPromoted =
+        '${s['last_promotion_status'] ?? ''}'.trim().toLowerCase() == 'promoted';
+    const keys = <String>['enroll_school', 'enrollment_date', 'admission_date', 'enroll_class'];
+    for (final key in keys) {
+      if (key == 'enroll_class' && isPromoted) continue;
       final raw = '${s[key] ?? ""}'.trim();
       if (raw.isEmpty || raw.toLowerCase() == 'null') continue;
       final parsed = _parseAnyDateToIso(raw);
       if (parsed != null) return parsed;
+    }
+    final cf = s['custom_fields'];
+    if (cf is Map) {
+      for (final key in keys) {
+        if (key == 'enroll_class' && isPromoted) continue;
+        final raw = '${cf[key] ?? ""}'.trim();
+        if (raw.isEmpty || raw.toLowerCase() == 'null') continue;
+        final parsed = _parseAnyDateToIso(raw);
+        if (parsed != null) return parsed;
+      }
     }
     return null;
   }
 
   String? _studentExitIso(Map<String, dynamic> s) {
-    for (final key in const <String>['leaving_date', 'exit_date', 'left_date']) {
+    const keys = <String>['leaving_date', 'exit_date', 'left_date'];
+    for (final key in keys) {
       final raw = '${s[key] ?? ""}'.trim();
       if (raw.isEmpty || raw.toLowerCase() == 'null') continue;
       final parsed = _parseAnyDateToIso(raw);
       if (parsed != null) return parsed;
     }
+    final cf = s['custom_fields'];
+    if (cf is Map) {
+      for (final key in keys) {
+        final raw = '${cf[key] ?? ""}'.trim();
+        if (raw.isEmpty || raw.toLowerCase() == 'null') continue;
+        final parsed = _parseAnyDateToIso(raw);
+        if (parsed != null) return parsed;
+      }
+    }
+    if (s['is_active'] == false) {
+      final fallback = _parseAnyDateToIso('${s['updated_at'] ?? ""}');
+      if (fallback != null) return fallback;
+    }
     return null;
+  }
+
+  String _studentExitReasonNormalized(Map<String, dynamic> s) {
+    for (final key in const <String>[
+      'exit_reason',
+      'leaving_reason',
+      'reason_for_leaving',
+      'archive_reason',
+    ]) {
+      final raw = '${s[key] ?? ""}'.trim();
+      if (raw.isNotEmpty && raw.toLowerCase() != 'null') {
+        return raw.toLowerCase();
+      }
+    }
+    final cf = s['custom_fields'];
+    if (cf is Map) {
+      for (final entry in cf.entries) {
+        final k = '${entry.key}'
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^a-z0-9\u0A80-\u0AFF]'), '');
+        if (const <String>{
+          'exitreason',
+          'leavingreason',
+          'reasonforleaving',
+          'archivereason',
+          'inactivereason',
+          'removalreason',
+          'reason',
+          'નામકમીકારણ',
+          'ગેરહાજરીનાકારણ',
+          'કારણ',
+        }.contains(k)) {
+          final v = '${entry.value ?? ""}'.trim();
+          if (v.isNotEmpty && v.toLowerCase() != 'null') {
+            return v.toLowerCase();
+          }
+        }
+      }
+    }
+    return '';
   }
 
   bool _studentEligibleForReportDate(Map<String, dynamic> s, String dateIso) {
     final adm = _studentAdmissionIso(s);
     final ex = _studentExitIso(s);
     if (adm != null && dateIso.compareTo(adm) < 0) return false;
-    if (ex != null && dateIso.compareTo(ex) > 0) return false;
+    if (ex != null && dateIso.compareTo(ex) >= 0) return false;
     if (ex == null && s['is_active'] == false) return false;
     return true;
   }
@@ -4774,6 +6742,15 @@ class SupabaseClient {
         'gender_breakdown': breakdown,
         'attendance_mode': '${day?['attendance_mode'] ?? 'none'}',
         'student_details_saved': day?['student_details_saved'] == true,
+        'present_saved': day?['present_saved'],
+        'mdm_saved': day?['mdm_saved'],
+        'breakfast_saved': day?['breakfast_saved'],
+        'present_frozen': day?['present_frozen'],
+        'mdm_frozen': day?['mdm_frozen'],
+        'breakfast_frozen': day?['breakfast_frozen'],
+        'is_frozen': day?['is_frozen'],
+        'unfrozen_by_admin': day?['unfrozen_by_admin'],
+        'class_teacher_id': c['class_teacher_id'],
       });
     }
     return out;
@@ -5023,7 +7000,7 @@ class SupabaseClient {
     for (final c in classes) {
       final cid = '${c['id']}';
       final cStudents = students
-          .where((s) => '${s['class_id']}' == cid)
+          .where((s) => _effectiveClassIdForStudentOnDate(s, monthEnd) == cid)
           .toList();
       final mDays = monthDaysByClass[cid] ?? <Map<String, dynamic>>[];
 
@@ -5160,7 +7137,19 @@ class SupabaseClient {
         for (final s in groupStudents) {
           final adm = admissionDateOf(s);
           final ex = exitDateOf(s);
-          final reason = '${s['exit_reason'] ?? ""}'.trim().toLowerCase();
+          final reason = _studentExitReasonNormalized(s);
+          final reasonCompact = reason.replaceAll(RegExp(r'\s+'), '');
+          final isAbsenceReason = const <String>{
+                'continuous_absence',
+                'long_absence',
+                'removed_for_absence',
+              }.contains(reason) ||
+              (reasonCompact.contains('continuous') &&
+                  reasonCompact.contains('absence')) ||
+              (reasonCompact.contains('સતત') &&
+                  reasonCompact.contains('ગેરહાજ')) ||
+              (reasonCompact.contains('ગેરહાજરી') &&
+                  reasonCompact.contains('કમી'));
 
           if (adm.compareTo(monthStart) < 0 &&
               (ex == null || ex.compareTo(monthStart) >= 0)) {
@@ -5173,20 +7162,10 @@ class SupabaseClient {
               ex != null &&
               ex.compareTo(monthStart) >= 0 &&
               ex.compareTo(monthEnd) <= 0) {
-            if (const <String>{
-              'lc',
-              'lc_issued',
-              'leaving_certificate',
-            }.contains(reason)) {
-              lcExit++;
-            } else if (const <String>{
-              'continuous_absence',
-              'long_absence',
-              'removed_for_absence',
-            }.contains(reason)) {
+            if (isAbsenceReason) {
               absExit++;
             } else {
-              otherExit++;
+              lcExit++;
             }
           }
           if (adm.compareTo(monthEnd) <= 0 &&
@@ -5259,6 +7238,14 @@ class SupabaseClient {
     required Map<String, dynamic> student,
     int? requestedRoll,
   }) async {
+    final ctx = await _resolveCurrentTeacherContext();
+    if (ctx != null && !ctx.canManageClassStudents(classId)) {
+      throw const PostgrestException(
+        message:
+            'માત્ર જે-તે વર્ગના વર્ગ શિક્ષક (Class Teacher) અથવા School Admin જ આ વર્ગમાં નવો વિદ્યાર્થી ઉમેરી શકે છે. વિષય શિક્ષક (Subject Teacher) વિદ્યાર્થી ઉમેરી શકતા નથી.',
+        code: '42501',
+      );
+    }
     final name = '${student['name'] ?? ''}'.trim();
     if (name.isEmpty) {
       throw const PostgrestException(message: 'Student name is required.');
@@ -5467,6 +7454,7 @@ class SupabaseClient {
     }
 
     final allowedKeys = <String>[
+      'class_id',
       'gr',
       'dd',
       'mm',
@@ -5526,10 +7514,20 @@ class SupabaseClient {
         .collection('students')
         .doc(studentId)
         .set(patch, fs.SetOptions(merge: true));
-    await _renumberActiveClassStudentsContinually(
-      schoolRef: schoolRef,
-      classId: '${target['class_id'] ?? ''}',
-    );
+    final oldCid = '${target['class_id'] ?? ''}'.trim();
+    final newCid = '${patch['class_id'] ?? oldCid}'.trim();
+    if (oldCid.isNotEmpty) {
+      await _renumberActiveClassStudentsContinually(
+        schoolRef: schoolRef,
+        classId: oldCid,
+      );
+    }
+    if (newCid.isNotEmpty && newCid != oldCid) {
+      await _renumberActiveClassStudentsContinually(
+        schoolRef: schoolRef,
+        classId: newCid,
+      );
+    }
   }
 
   Future<void> _renumberActiveClassStudentsContinually({
@@ -5604,6 +7602,42 @@ class SupabaseClient {
 
     if (ops > 0) {
       await batch.commit();
+      try {
+        final desiredRollByStudentId = <String, String>{
+          for (var i = 0; i < activeList.length; i++)
+            '${activeList[i]['id'] ?? ''}'.trim(): '${i + 1}',
+        };
+        final txSnap = await _db
+            .collection('library_transactions')
+            .where('school_ref', isEqualTo: schoolRef)
+            .get();
+        var txBatch = _db.batch();
+        var txOps = 0;
+        for (final txDoc in txSnap.docs) {
+          final td = txDoc.data();
+          final status = '${td['status'] ?? ''}'.trim().toLowerCase();
+          final retDate = '${td['return_date'] ?? ''}'.trim();
+          if (status == 'returned' || retDate.isNotEmpty) continue;
+          final sid = '${td['student_id'] ?? ''}'.trim();
+          final newRoll = desiredRollByStudentId[sid];
+          if (newRoll != null &&
+              '${td['roll_number_snapshot'] ?? ''}'.trim() != newRoll) {
+            txBatch.set(
+              _db.collection('library_transactions').doc(txDoc.id),
+              <String, dynamic>{
+                'roll_number_snapshot': newRoll,
+                'updated_at': nowIso,
+              },
+              fs.SetOptions(merge: true),
+            );
+            txOps++;
+          }
+        }
+        if (txOps > 0) {
+          await txBatch.commit();
+          FirestoreQueryBuilder.invalidateCache('library_transactions');
+        }
+      } catch (_) {}
     }
     FirestoreQueryBuilder.invalidateCache('students');
   }
@@ -5802,6 +7836,14 @@ class SupabaseClient {
       );
     }
     final classId = '${target['class_id'] ?? ''}'.trim();
+    final ctx = await _resolveCurrentTeacherContext();
+    if (ctx != null && !ctx.canManageClassStudents(classId)) {
+      throw const PostgrestException(
+        message:
+            'માત્ર જે-તે વર્ગના વર્ગ શિક્ષક (Class Teacher) અથવા School Admin જ વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરી શકે છે. વિષય શિક્ષક (Subject Teacher) વિદ્યાર્થીને Deactive કરી શકતા નથી.',
+        code: '42501',
+      );
+    }
     final oldRollText = '${target['roll_number'] ?? ''}'.trim();
     final nowIso = DateTime.now().toUtc().toIso8601String();
     final col = _db.collection('students');
@@ -5817,11 +7859,21 @@ class SupabaseClient {
           message: 'LEAVING_DATE_BEFORE_ENROLLMENT: શાળા છોડ્યાની તારીખ શાળામાં દાખલ તારીખ કરતાં પહેલાંની હોઈ શકે નહીં.',
         );
       }
-      // Step 1: Save leaving_date first, then set is_active = false while keeping the student record.
+      final cleanReason = exitReason.trim().isEmpty ? 'lc' : exitReason.trim();
+      final existingCf = target['custom_fields'] is Map
+          ? Map<String, dynamic>.from(target['custom_fields'] as Map)
+          : <String, dynamic>{};
+      existingCf['leaving_date'] = normEx;
+      existingCf['exit_date'] = normEx;
+      existingCf['exit_reason'] = cleanReason;
+      existingCf['leaving_reason'] = cleanReason;
+      // Step 1: Save leaving_date & exit_reason (both top-level and custom_fields), then set is_active = false.
       await col.doc(studentId).set(<String, dynamic>{
         'leaving_date': normEx,
         'exit_date': normEx,
-        'exit_reason': exitReason.isEmpty ? 'other' : exitReason,
+        'exit_reason': cleanReason,
+        'leaving_reason': cleanReason,
+        'custom_fields': existingCf,
         if (oldRollText.isNotEmpty) 'previous_roll_number': oldRollText,
         'roll_number': '',
         'is_active': false,
@@ -5833,6 +7885,41 @@ class SupabaseClient {
       schoolRef: schoolRef,
       classId: classId,
     );
+
+    // Clean up any saved attendance marks & refresh attendance_days counts on or after leaving_date
+    try {
+      final rawEx = (exitDate ?? _indiaTodayIso()).trim();
+      final normEx = _parseAnyDateToIso(rawEx) ?? (rawEx.isEmpty ? _indiaTodayIso() : rawEx);
+      final cutoffIso = deletePermanently
+          ? '1900-01-01'
+          : (normEx.length >= 10 ? normEx.substring(0, 10) : _indiaTodayIso());
+      if (classId.isNotEmpty) {
+        final affectedDays = await from('attendance_days')
+            .select('id,attendance_date')
+            .eq('school_ref', schoolRef)
+            .eq('class_id', classId)
+            .gte('attendance_date', cutoffIso);
+        for (final dayRow in affectedDays) {
+          final dayId = '${dayRow['id'] ?? ''}'.trim();
+          if (dayId.isEmpty) continue;
+          try {
+            await _db.collection('attendance_days').doc(dayId).update(
+              <String, dynamic>{
+                'student_marks.$cleanStudentId': fs.FieldValue.delete(),
+              },
+            );
+          } catch (_) {}
+          try {
+            await _db
+                .collection('student_attendance')
+                .doc('${dayId}__$cleanStudentId')
+                .delete();
+          } catch (_) {}
+          FirestoreQueryBuilder.invalidateCache('student_attendance');
+          await _refreshAttendanceDayCounts(dayId);
+        }
+      }
+    } catch (_) {}
   }
 
   static String? _parseAnyDateToIso(String raw) {
@@ -6729,6 +8816,7 @@ class SupabaseClient {
     Map<String, String> classTargetClassMap = const <String, String>{},
     String newClassEnrollDate = '',
     bool keepSameClassTeacher = true,
+    Map<String, String> newClassTeacherMap = const <String, String>{},
   }) async {
     final preview = await _getClassPromotionPreview(schoolRef: schoolRef);
     final canPromote = preview['can_promote'] == true;
@@ -6831,14 +8919,39 @@ class SupabaseClient {
           affectedClasses.add(effectiveNextClassId);
           promotedClassPairs.putIfAbsent(currentClassId, () => effectiveNextClassId);
           // Promote to next class and update enroll_class to the Admin-selected new class enroll date
-          // (while keeping enroll_school, dob, and non-promoted students' enroll_class untouched!)
+          // while preserving previous_enroll_class + promotion_history so Hajari Patrak can print
+          // BOTH old class (old enroll date) and new class (new enroll date) in the promotion month,
+          // and all previous year attendance & result records remain 100% intact.
+          final oldEnrollClass = '${st['enroll_class'] ?? ''}'.trim();
+          final existingPromoHist = st['promotion_history'] is List
+              ? (st['promotion_history'] as List)
+                    .whereType<Map>()
+                    .map((m) => Map<String, dynamic>.from(m))
+                    .toList()
+              : <Map<String, dynamic>>[];
+          existingPromoHist.add(<String, dynamic>{
+            'from_class_id': currentClassId,
+            'from_class_label': currentClassLabel,
+            'to_class_id': effectiveNextClassId,
+            'to_class_label': effectiveNextClassLabel,
+            'old_enroll_class': oldEnrollClass,
+            'new_enroll_class': cleanEnrollDate.isNotEmpty
+                ? cleanEnrollDate
+                : oldEnrollClass,
+            'old_roll_number': oldRoll,
+            'new_roll_number': '${idx + 1}',
+            'promoted_at': todayIso,
+          });
           batch.set(
             col.doc(sid),
             <String, dynamic>{
               'class_id': effectiveNextClassId,
               'roll_number': '${idx + 1}',
               if (oldRoll.isNotEmpty) 'previous_roll_number': oldRoll,
+              if (oldEnrollClass.isNotEmpty)
+                'previous_enroll_class': oldEnrollClass,
               if (cleanEnrollDate.isNotEmpty) 'enroll_class': cleanEnrollDate,
+              'promotion_history': existingPromoHist,
               'promoted_from_class_id': currentClassId,
               'promoted_from_class_label': currentClassLabel,
               'promoted_to_class_id': effectiveNextClassId,
@@ -6887,9 +9000,100 @@ class SupabaseClient {
       await batch.commit();
     }
 
-    // If keepSameClassTeacher is enabled, keep the same Class Teacher assigned to the promoted class
-    // (Admin can edit later in Class & Teacher Settings if required).
-    if (keepSameClassTeacher && promotedClassPairs.isNotEmpty) {
+    // Apply explicit New Class Teacher mapping if provided by Admin during promotion
+    if (newClassTeacherMap.isNotEmpty) {
+      try {
+        var cBatch = _db.batch();
+        var cOps = 0;
+        final assignedClassesByTeacher = <String, Set<String>>{};
+        for (final entry in newClassTeacherMap.entries) {
+          final cid = entry.key.trim();
+          final tid = entry.value.trim();
+          if (cid.isEmpty || !classLabelById.containsKey(cid)) continue;
+          cBatch.set(
+            _db.collection('school_classes').doc(cid),
+            <String, dynamic>{
+              'class_teacher_id': tid.isEmpty ? null : tid,
+              'updated_at': nowIso,
+            },
+            fs.SetOptions(merge: true),
+          );
+          cOps++;
+          if (tid.isNotEmpty) {
+            assignedClassesByTeacher
+                .putIfAbsent(tid, () => <String>{})
+                .add(cid);
+          }
+        }
+        if (cOps > 0) {
+          await cBatch.commit();
+          FirestoreQueryBuilder.invalidateCache('school_classes');
+        }
+        if (assignedClassesByTeacher.isNotEmpty) {
+          final tSnap = await _db
+              .collection('school_teachers')
+              .where('school_ref', isEqualTo: schoolRef)
+              .get();
+          var tBatch = _db.batch();
+          var tOps = 0;
+          for (final tDoc in tSnap.docs) {
+            final td = tDoc.data();
+            final tid = '${td['id'] ?? tDoc.id}'.trim();
+            final newCids = assignedClassesByTeacher[tid];
+            if (newCids == null || newCids.isEmpty) continue;
+            final existingAllowed = td['allowed_classes'] is List
+                ? (td['allowed_classes'] as List)
+                      .map((e) => '$e'.trim())
+                      .where((s) => s.isNotEmpty)
+                      .toSet()
+                : <String>{};
+            for (final cid in newCids) {
+              existingAllowed.add(cid);
+              final k = classKeyById[cid] ?? '';
+              final l = classLabelById[cid] ?? '';
+              if (k.isNotEmpty) existingAllowed.add(k);
+              if (l.isNotEmpty) existingAllowed.add(l);
+            }
+            tBatch.set(
+              tDoc.reference,
+              <String, dynamic>{
+                'allowed_classes': existingAllowed.toList(),
+                'updated_at': nowIso,
+              },
+              fs.SetOptions(merge: true),
+            );
+            tOps++;
+          }
+          if (tOps > 0) {
+            await tBatch.commit();
+            FirestoreQueryBuilder.invalidateCache('school_teachers');
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Record a promotion archive entry (attendance & result records remain preserved untouched)
+    try {
+      final archiveId = '${schoolRef}__promo__${todayIso}_${DateTime.now().millisecondsSinceEpoch}';
+      await _db.collection('school_promotion_archives').doc(archiveId).set(
+        <String, dynamic>{
+          'id': archiveId,
+          'school_ref': schoolRef,
+          'promoted_at': todayIso,
+          'new_class_enroll_date': cleanEnrollDate,
+          'promoted_count': promotedCount,
+          'graduated_count': graduatedCount,
+          'retained_count': retainedCount,
+          'new_class_teacher_map': newClassTeacherMap,
+          'attendance_and_result_archived': true,
+          'created_at': nowIso,
+        },
+      );
+    } catch (_) {}
+
+    // If keepSameClassTeacher is enabled and no explicit teacher map was given,
+    // keep the same Class Teacher assigned to the promoted class.
+    if (newClassTeacherMap.isEmpty && keepSameClassTeacher && promotedClassPairs.isNotEmpty) {
       try {
         final tSnap = await _db
             .collection('school_teachers')
@@ -7528,6 +9732,8 @@ class SupabaseClient {
       }
     }
     if (ops > 0) await batch.commit();
+    FirestoreQueryBuilder.invalidateCache('library_books');
+    FirestoreQueryBuilder.invalidateCache('library_book_number_history');
 
     return <String, dynamic>{
       'added': added,
@@ -7574,6 +9780,7 @@ class SupabaseClient {
       'retired_by_teacher_name': ctx?.teacherName ?? '',
       'updated_at': nowIso,
     });
+    FirestoreQueryBuilder.invalidateCache('library_books');
     return <String, dynamic>{
       'archived': true,
       'book_number': book['book_number'],
@@ -7654,6 +9861,8 @@ class SupabaseClient {
       },
     );
     await batch.commit();
+    FirestoreQueryBuilder.invalidateCache('library_books');
+    FirestoreQueryBuilder.invalidateCache('library_book_number_history');
     return <String, dynamic>{
       'changed': true,
       'old_book_number': oldNumber,
@@ -7812,6 +10021,7 @@ class SupabaseClient {
       },
     );
 
+    FirestoreQueryBuilder.invalidateCache('library_transactions');
     return <String, dynamic>{
       'id': txId,
       'book_number': book['book_number'],
@@ -7862,12 +10072,250 @@ class SupabaseClient {
       },
     );
 
+    FirestoreQueryBuilder.invalidateCache('library_transactions');
     return <String, dynamic>{
       'id': txId,
       'book_number': tx['book_number_snapshot'],
       'book_name': tx['book_name_snapshot'],
       'borrower_name': tx['borrower_name_snapshot'],
       'return_date': returnDate,
+    };
+  }
+
+  static String? _lastAutoCloudPurgeDateIso;
+
+  static String _extractIndiaDateIsoFromAny(dynamic rawValue) {
+    final raw = '${rawValue ?? ''}'.trim();
+    if (raw.isEmpty) return '';
+    final parsedIso = _parseAnyDateToIso(raw);
+    if (parsedIso != null && parsedIso.length >= 10) {
+      return parsedIso.substring(0, 10);
+    }
+    final dt = DateTime.tryParse(raw);
+    if (dt != null) {
+      final ist = dt.toUtc().add(const Duration(hours: 5, minutes: 30));
+      return '${ist.year.toString().padLeft(4, '0')}-${ist.month.toString().padLeft(2, '0')}-${ist.day.toString().padLeft(2, '0')}';
+    }
+    if (raw.length >= 10 && RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(raw)) {
+      return raw.substring(0, 10);
+    }
+    return '';
+  }
+
+  /// Automatically deletes expired developer shared files, developer messages,
+  /// message dismissals, validity reminder dismissals, school admin messages,
+  /// and temporary file shares after their display date (< India today).
+  Future<Map<String, int>> purgeExpiredCloudStorageAndMessages({
+    bool force = false,
+    bool deleteAllSharedFiles = false,
+  }) async {
+    final today = _indiaTodayIso();
+    if (!force && !deleteAllSharedFiles) {
+      if (_lastAutoCloudPurgeDateIso == today) {
+        return const <String, int>{};
+      }
+      final ctx = _cachedContext;
+      if (ctx != null && !ctx.isAdmin) {
+        // Skip multi-collection background cleanup for regular teacher sessions
+        _lastAutoCloudPurgeDateIso = today;
+        return const <String, int>{};
+      }
+    }
+    _lastAutoCloudPurgeDateIso = today;
+    int deletedDevMessages = 0;
+    int deletedDismissals = 0;
+    int deletedValidityDismissals = 0;
+    int deletedAdminMessages = 0;
+    int deletedDevFiles = 0;
+    int deletedSchoolSharedFiles = 0;
+
+    final activeDevMessageIds = <String>{};
+
+    // 1. developer_messages: delete any message where display_date < today
+    try {
+      final snap = await _db.collection('developer_messages').get();
+      for (final d in snap.docs) {
+        final data = d.data();
+        final dispDate = _extractIndiaDateIsoFromAny(
+          data['display_date'] ?? data['created_at'],
+        );
+        if (dispDate.isNotEmpty && dispDate.compareTo(today) < 0) {
+          try {
+            await d.reference.delete();
+            deletedDevMessages++;
+          } catch (_) {}
+        } else {
+          activeDevMessageIds.add('${data['id'] ?? d.id}'.trim());
+          activeDevMessageIds.add(d.id);
+        }
+      }
+      if (deletedDevMessages > 0) {
+        FirestoreQueryBuilder.invalidateCache('developer_messages');
+      }
+    } catch (_) {}
+
+    // 2. developer_message_dismissals: delete if message_id is no longer in active developer_messages OR dismissed_at date < today
+    try {
+      final snap = await _db.collection('developer_message_dismissals').get();
+      for (final d in snap.docs) {
+        final data = d.data();
+        final mid = '${data['message_id'] ?? ''}'.trim();
+        final dismDate = _extractIndiaDateIsoFromAny(data['dismissed_at']);
+        final isOrphan = mid.isEmpty || !activeDevMessageIds.contains(mid);
+        final isOld = dismDate.isNotEmpty && dismDate.compareTo(today) < 0;
+        if (isOrphan || isOld) {
+          try {
+            await d.reference.delete();
+            deletedDismissals++;
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    // 3. school_validity_reminder_dismissals: delete if reminder_date < today
+    try {
+      final snap =
+          await _db.collection('school_validity_reminder_dismissals').get();
+      for (final d in snap.docs) {
+        final data = d.data();
+        final rDate = _extractIndiaDateIsoFromAny(
+          data['reminder_date'] ?? data['dismissed_at'],
+        );
+        final docParts = d.id.split('__');
+        final idDate = docParts.length >= 3 ? docParts.last.trim() : '';
+        final checkDate = rDate.isNotEmpty ? rDate : idDate;
+        if (checkDate.isNotEmpty && checkDate.compareTo(today) < 0) {
+          try {
+            await d.reference.delete();
+            deletedValidityDismissals++;
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    // 4. school_admin_messages: delete if message_date < today
+    try {
+      final snap = await _db.collection('school_admin_messages').get();
+      for (final d in snap.docs) {
+        final data = d.data();
+        final mDate = _extractIndiaDateIsoFromAny(
+          data['message_date'] ?? data['created_at'],
+        );
+        final docParts = d.id.split('__');
+        final idDate = docParts.length >= 2 ? docParts.last.trim() : '';
+        final checkDate = mDate.isNotEmpty ? mDate : idDate;
+        if (checkDate.isNotEmpty && checkDate.compareTo(today) < 0) {
+          try {
+            await d.reference.delete();
+            deletedAdminMessages++;
+          } catch (_) {}
+        }
+      }
+      if (deletedAdminMessages > 0) {
+        FirestoreQueryBuilder.invalidateCache('school_admin_messages');
+      }
+    } catch (_) {}
+
+    // 5. developer_shared_files + school_assets (dev_shared__*): delete if display_date (or created_at date) < today
+    final activeDevAssetDocIds = <String>{};
+    try {
+      final snap = await _db.collection('developer_shared_files').get();
+      for (final d in snap.docs) {
+        final data = d.data();
+        final fileId = '${data['id'] ?? d.id}'.trim();
+        final assetDocId =
+            '${data['asset_doc_id'] ?? 'dev_shared__$fileId'}'.trim();
+        final dispDate = _extractIndiaDateIsoFromAny(
+          data['display_date'] ?? data['created_at'] ?? data['updated_at'],
+        );
+        final isExpired =
+            deleteAllSharedFiles ||
+            data['is_active'] == false ||
+            (dispDate.isNotEmpty && dispDate.compareTo(today) < 0);
+        if (isExpired) {
+          if (assetDocId.isNotEmpty) {
+            try {
+              await _db.collection('school_assets').doc(assetDocId).delete();
+            } catch (_) {}
+          }
+          try {
+            await d.reference.delete();
+            deletedDevFiles++;
+          } catch (_) {}
+        } else {
+          if (assetDocId.isNotEmpty) activeDevAssetDocIds.add(assetDocId);
+          activeDevAssetDocIds.add('dev_shared__$fileId');
+          activeDevAssetDocIds.add('dev_shared__${d.id}');
+        }
+      }
+      // Also clean any orphaned dev_shared__* assets in school_assets (pushed filter so school logos are never read)
+      final assetSnap = await _db
+          .collection('school_assets')
+          .where('bucket', isEqualTo: 'developer-shared-files')
+          .get();
+      for (final aDoc in assetSnap.docs) {
+        final aData = aDoc.data();
+        final isDevAsset = aDoc.id.startsWith('dev_shared__') ||
+            '${aData['bucket'] ?? ''}' == 'developer-shared-files';
+        if (!isDevAsset) continue;
+        final aDate = _extractIndiaDateIsoFromAny(
+          aData['display_date'] ?? aData['updated_at'] ?? aData['created_at'],
+        );
+        final isOrphanOrExpired =
+            deleteAllSharedFiles ||
+            !activeDevAssetDocIds.contains(aDoc.id) ||
+            (aDate.isNotEmpty && aDate.compareTo(today) < 0);
+        if (isOrphanOrExpired) {
+          try {
+            await aDoc.reference.delete();
+            deletedDevFiles++;
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    // 6. school_shared_files & file_beam_rooms (+ chunks): delete if display/created date < today or expired
+    for (final colName in const <String>[
+      'school_shared_files',
+      'file_beam_rooms',
+    ]) {
+      try {
+        final snap = await _db.collection(colName).get();
+        for (final d in snap.docs) {
+          final data = d.data();
+          final cDate = _extractIndiaDateIsoFromAny(
+            data['display_date'] ?? data['created_at'] ?? data['updated_at'],
+          );
+          final expRaw = '${data['expires_at'] ?? ''}'.trim();
+          final expDt = expRaw.isNotEmpty ? DateTime.tryParse(expRaw) : null;
+          final isExpiredByTime =
+              expDt != null && DateTime.now().toUtc().isAfter(expDt.toUtc());
+          final isExpiredByDate =
+              cDate.isNotEmpty && cDate.compareTo(today) < 0;
+          if (deleteAllSharedFiles || isExpiredByTime || isExpiredByDate) {
+            try {
+              final chunkSnap =
+                  await d.reference.collection('chunks').limit(400).get();
+              for (final ch in chunkSnap.docs) {
+                try {
+                  await ch.reference.delete();
+                } catch (_) {}
+              }
+              await d.reference.delete();
+              deletedSchoolSharedFiles++;
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+
+    return <String, int>{
+      'deleted_developer_messages': deletedDevMessages,
+      'deleted_message_dismissals': deletedDismissals,
+      'deleted_validity_dismissals': deletedValidityDismissals,
+      'deleted_school_admin_messages': deletedAdminMessages,
+      'deleted_developer_shared_files': deletedDevFiles,
+      'deleted_school_shared_files': deletedSchoolSharedFiles,
     };
   }
 }
@@ -8190,6 +10638,12 @@ class FirestoreFunctionsClient {
         'validity_date': school['validity_date'],
         'is_blocked': isBlocked,
         'block_reason': '${school['block_reason'] ?? ''}',
+        'disabled_modules': school['disabled_modules'] is Iterable
+            ? (school['disabled_modules'] as Iterable)
+                  .map((e) => '$e'.trim().toLowerCase())
+                  .where((v) => v.isNotEmpty)
+                  .toList()
+            : const <String>[],
         'can_edit': !isBlocked,
         'can_download_reports': true,
       },
@@ -8311,6 +10765,15 @@ class FirestoreFunctionsClient {
     return 'u$uuid@psm-login.invalid';
   }
 
+  static String _normDiseDigits(String input) {
+    const guj = '૦૧૨૩૪૫૬૭૮૯';
+    var out = input.trim();
+    for (var i = 0; i < guj.length; i++) {
+      out = out.replaceAll(guj[i], '$i');
+    }
+    return out;
+  }
+
   Future<void> _ensureDeveloperAuthSession(String devKey) async {
     final fbAuth = fb_auth.FirebaseAuth.instance;
     if (fbAuth.currentUser != null) return;
@@ -8330,9 +10793,30 @@ class FirestoreFunctionsClient {
         );
         return;
       } catch (_) {
+        // Fallback: if dev_console_service@psm-login.invalid already exists with an
+        // older developer key password, sign in or create a dedicated per-key dev session
+        // so FirebaseAuth.instance.currentUser is never null during school delete/edit.
+        final altKeySlug = devKey.trim().replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+        final altEmail = 'dev_service_${altKeySlug.isEmpty ? "admin" : altKeySlug}@psm-login.invalid';
         try {
-          await fbAuth.signInAnonymously();
-        } catch (_) {}
+          await fbAuth.signInWithEmailAndPassword(
+            email: altEmail,
+            password: devPassword,
+          );
+          return;
+        } catch (_) {
+          try {
+            await fbAuth.createUserWithEmailAndPassword(
+              email: altEmail,
+              password: devPassword,
+            );
+            return;
+          } catch (_) {
+            try {
+              await fbAuth.signInAnonymously();
+            } catch (_) {}
+          }
+        }
       }
     }
   }
@@ -8391,6 +10875,31 @@ class FirestoreFunctionsClient {
   Future<int> _deleteAllSchoolData(String schoolRef, String diseNo) async {
     if (schoolRef.trim().isEmpty) return 0;
     var total = 0;
+
+    // Also delete student_result_roster_members belonging to snapshots of this school
+    try {
+      final snapQuery = await _db
+          .collection('student_result_roster_snapshots')
+          .where('school_ref', isEqualTo: schoolRef)
+          .get();
+      for (final sDoc in snapQuery.docs) {
+        try {
+          final memSnap = await _db
+              .collection('student_result_roster_members')
+              .where('snapshot_id', isEqualTo: sDoc.id)
+              .get();
+          if (memSnap.docs.isNotEmpty) {
+            final b = _db.batch();
+            for (final m in memSnap.docs) {
+              b.delete(m.reference);
+            }
+            await b.commit();
+            total += memSnap.docs.length;
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+
     for (final name in _schoolOwnedCollections) {
       final col = _db.collection(name);
       while (true) {
@@ -8401,17 +10910,30 @@ class FirestoreFunctionsClient {
           break; // collection not readable / not used: skip it
         }
         if (snap.docs.isEmpty) break;
-        if (_chunkedCollections.contains(name)) {
-          for (final d in snap.docs) {
-            total += await _deleteDocWithChunks(d.reference);
+        try {
+          if (_chunkedCollections.contains(name)) {
+            for (final d in snap.docs) {
+              total += await _deleteDocWithChunks(d.reference);
+            }
+          } else {
+            final batch = _db.batch();
+            for (final d in snap.docs) {
+              batch.delete(d.reference);
+            }
+            await batch.commit();
+            total += snap.docs.length;
           }
-        } else {
-          final batch = _db.batch();
+        } catch (_) {
+          // Fallback to per-document delete; if blocked by rules, break out of while loop
+          var anyDeleted = false;
           for (final d in snap.docs) {
-            batch.delete(d.reference);
+            try {
+              await d.reference.delete();
+              total++;
+              anyDeleted = true;
+            } catch (_) {}
           }
-          await batch.commit();
-          total += snap.docs.length;
+          if (!anyDeleted) break;
         }
         if (snap.docs.length < 300) break;
       }
@@ -8431,6 +10953,18 @@ class FirestoreFunctionsClient {
         }
       } catch (_) {}
     }
+    // Delete any subcollections under schools/{schoolRef} if present
+    for (final subName in const ['settings', 'classes', 'students', 'teachers', 'attendance']) {
+      try {
+        final subSnap = await _db.collection('schools').doc(schoolRef).collection(subName).limit(300).get();
+        for (final d in subSnap.docs) {
+          try {
+            await d.reference.delete();
+            total++;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
     // Registration request for this DISE number, so the school can register afresh.
     final dise = diseNo.trim();
     if (dise.isNotEmpty) {
@@ -8447,7 +10981,7 @@ class FirestoreFunctionsClient {
         }
       } catch (_) {}
     }
-    // Finally the school record itself.
+    // Always delete the school record itself.
     await _db.collection('schools').doc(schoolRef).delete();
     return total + 1;
   }
@@ -9058,8 +11592,15 @@ class FirestoreFunctionsClient {
                   }, fs.SetOptions(merge: true));
                 }
               }
+              final disabledModules = s['disabled_modules'] is Iterable
+                  ? (s['disabled_modules'] as Iterable)
+                        .map((e) => '$e'.trim().toLowerCase())
+                        .where((v) => v.isNotEmpty)
+                        .toList()
+                  : const <String>[];
               return <String, dynamic>{
                 ...s,
+                'disabled_modules': disabledModules,
                 'prev_attendance_upload_enabled': prevUploadEnabled,
                 'admin_id': '${adm?['id'] ?? ''}',
                 'admin_name': '${adm?['teacher_name'] ?? ''}',
@@ -9239,16 +11780,26 @@ class FirestoreFunctionsClient {
         case 'developer.delete_school':
           {
             final id = '${body['schoolRef'] ?? ''}'.trim();
-            final confirm = '${body['confirmSchoolId'] ?? ''}'.trim();
+            final confirm = _normDiseDigits('${body['confirmSchoolId'] ?? ''}');
             final sDoc = await _db.collection('schools').doc(id).get();
-            if (!sDoc.exists ||
-                '${sDoc.data()?['school_id'] ?? ''}' != confirm) {
+            if (!sDoc.exists) {
               throw const PostgrestException(
-                message: 'Confirmation DISE number does not match this school.',
+                message: 'School record not found.',
               );
             }
             final sData = sDoc.data()!;
-            final deleted = await _deleteAllSchoolData(id, '${sData['school_id'] ?? confirm}');
+            final storedDise = _normDiseDigits(
+              '${sData['school_id'] ?? sData['udise_code'] ?? sData['dise_code'] ?? ''}',
+            );
+            final matchesDise = storedDise.isNotEmpty
+                ? (confirm == storedDise || confirm.toUpperCase() == 'DELETE')
+                : (confirm.isNotEmpty);
+            if (!matchesDise) {
+              throw PostgrestException(
+                message: 'Confirmation DISE number ($confirm) does not match this school ($storedDise).',
+              );
+            }
+            final deleted = await _deleteAllSchoolData(id, storedDise.isNotEmpty ? storedDise : confirm);
             return <String, dynamic>{
               'ok': true,
               'deleted_school_id': sData['school_id'],
@@ -9564,6 +12115,7 @@ class FirestoreFunctionsClient {
 
         case 'developer.list_messages':
           {
+            await _client.purgeExpiredCloudStorageAndMessages();
             final snap = await _db.collection('developer_messages').get();
             final list = <Map<String, dynamic>>[];
             final expiredDeletes = <Future<void>>[];
@@ -9685,6 +12237,7 @@ class FirestoreFunctionsClient {
 
         case 'developer.get_usage':
           {
+            await _client.purgeExpiredCloudStorageAndMessages();
             final results = await Future.wait([
               _safeGetCollectionDocs('schools'),
               _safeGetCollectionDocs('school_teachers'),
@@ -9807,6 +12360,7 @@ class FirestoreFunctionsClient {
 
         case 'developer.list_shared_files':
           {
+            await _client.purgeExpiredCloudStorageAndMessages();
             final snap = await _db.collection('developer_shared_files').get();
             final files = snap.docs
                 .map((d) => <String, dynamic>{
@@ -9825,9 +12379,13 @@ class FirestoreFunctionsClient {
 
         case 'developer.upload_shared_file':
           {
+            await _client.purgeExpiredCloudStorageAndMessages();
             final fileName = '${body['fileName'] ?? 'file'}'.trim();
             final title = '${body['title'] ?? fileName}'.trim();
             final description = '${body['description'] ?? ''}'.trim();
+            final rawDisplayDate = '${body['displayDate'] ?? today}'.trim();
+            final displayDate =
+                SupabaseClient._parseAnyDateToIso(rawDisplayDate) ?? today;
             final mimeType =
                 '${body['mimeType'] ?? 'application/octet-stream'}'.trim();
             final base64Data = '${body['base64Data'] ?? ''}'.trim();
@@ -9852,6 +12410,8 @@ class FirestoreFunctionsClient {
                 'content_type': mimeType,
                 'size_bytes': sizeBytes,
                 'base64': base64Data,
+                'display_date': displayDate,
+                'created_at': nowIso,
                 'updated_at': nowIso,
               },
             );
@@ -9866,12 +12426,28 @@ class FirestoreFunctionsClient {
               'asset_doc_id': assetDocId,
               'storage_bucket': 'developer-shared-files',
               'storage_path': storagePath,
+              'display_date': displayDate,
               'is_active': true,
               'created_at': nowIso,
               'updated_at': nowIso,
             };
             await _db.collection('developer_shared_files').doc(id).set(metaRow);
             return <String, dynamic>{'file': metaRow};
+          }
+
+        case 'developer.purge_expired_cloud_data':
+          {
+            final deleteAllFiles =
+                body['deleteAllSharedFiles'] == true ||
+                '${body['deleteAllSharedFiles']}'.toLowerCase() == 'true';
+            final stats = await _client.purgeExpiredCloudStorageAndMessages(
+              force: true,
+              deleteAllSharedFiles: deleteAllFiles,
+            );
+            return <String, dynamic>{
+              'ok': true,
+              'stats': stats,
+            };
           }
 
         case 'developer.delete_shared_file':
@@ -9908,6 +12484,127 @@ class FirestoreFunctionsClient {
             return <String, dynamic>{'ok': true};
           }
 
+        case 'developer.set_school_modules':
+          {
+            final id = '${body['schoolRef'] ?? ''}'.trim();
+            if (id.isEmpty) {
+              throw const PostgrestException(
+                message: 'School reference is required.',
+              );
+            }
+            final rawDisabled =
+                body['disabledModules'] ?? body['disabled_modules'];
+            final disabledList = rawDisabled is Iterable
+                ? rawDisabled
+                      .map((e) => '$e'.trim().toLowerCase())
+                      .where((s) => s.isNotEmpty)
+                      .toSet()
+                      .toList()
+                : <String>[];
+            disabledList.sort();
+            await _db.collection('schools').doc(id).set(<String, dynamic>{
+              'disabled_modules': disabledList,
+              'updated_at': nowIso,
+            }, fs.SetOptions(merge: true));
+            try {
+              final settingsSnap =
+                  await _db.collection('school_settings').doc(id).get();
+              final existingCfg = settingsSnap.data()?['config'] is Map
+                  ? Map<String, dynamic>.from(
+                      settingsSnap.data()!['config'] as Map,
+                    )
+                  : <String, dynamic>{};
+              existingCfg['disabled_modules'] = disabledList;
+              await _db.collection('school_settings').doc(id).set(
+                <String, dynamic>{
+                  'id': id,
+                  'school_ref': id,
+                  'config': existingCfg,
+                  'updated_at': nowIso,
+                },
+                fs.SetOptions(merge: true),
+              );
+            } catch (_) {}
+            FirestoreQueryBuilder.invalidateCache('schools');
+            FirestoreQueryBuilder.invalidateCache('school_settings');
+            return <String, dynamic>{
+              'ok': true,
+              'schoolRef': id,
+              'disabled_modules': disabledList,
+            };
+          }
+
+        case 'developer.impersonate_school_admin':
+          {
+            final id = '${body['schoolRef'] ?? ''}'.trim();
+            if (id.isEmpty) {
+              throw const PostgrestException(
+                message: 'School reference is required.',
+              );
+            }
+            final schoolSnap = await _db.collection('schools').doc(id).get();
+            if (!schoolSnap.exists || schoolSnap.data() == null) {
+              throw const PostgrestException(
+                message: 'School not found.',
+              );
+            }
+            final school = <String, dynamic>{
+              ...schoolSnap.data()!,
+              'id': schoolSnap.data()!['id'] ?? schoolSnap.id,
+            };
+            final tSnap = await _db
+                .collection('school_teachers')
+                .where('school_ref', isEqualTo: id)
+                .get();
+            Map<String, dynamic>? adminProfile;
+            for (final d in tSnap.docs) {
+              final row = d.data();
+              if ('${row['role'] ?? ''}'.trim().toLowerCase() == 'admin') {
+                adminProfile = <String, dynamic>{
+                  ...row,
+                  'id': row['id'] ?? d.id,
+                };
+                break;
+              }
+            }
+            final disabledRaw = school['disabled_modules'];
+            final disabledList = disabledRaw is Iterable
+                ? disabledRaw
+                      .map((e) => '$e'.trim().toLowerCase())
+                      .where((s) => s.isNotEmpty)
+                      .toList()
+                : <String>[];
+            final isBlocked = school['is_blocked'] == true;
+            final profile = <String, dynamic>{
+              'teacher_id': '${adminProfile?['id'] ?? 'dev_admin_$id'}',
+              'teacher_name':
+                  '${adminProfile?['teacher_name'] ?? 'School Admin (Developer)'}',
+              'role': 'admin',
+              'allowed_classes': const <String>[],
+              'school_ref': id,
+              'school_id': '${school['school_id'] ?? ''}',
+              'school_name': '${school['school_name'] ?? ''}',
+              'school_name_en':
+                  '${school['school_name_en'] ?? school['school_name'] ?? ''}',
+              'school_name_gu': '${school['school_name_gu'] ?? ''}',
+              'school_address_en': '${school['school_address_en'] ?? ''}',
+              'school_address_gu': '${school['school_address_gu'] ?? ''}',
+              'school_type': '${school['school_type'] ?? 'mixed'}',
+              'validity_date': school['validity_date'],
+              'is_blocked': isBlocked,
+              'block_reason': '${school['block_reason'] ?? ''}',
+              'disabled_modules': disabledList,
+              'can_edit': true,
+              'can_download_reports': true,
+              'is_developer_session': true,
+            };
+            return <String, dynamic>{
+              'ok': true,
+              'school': school,
+              'profile': profile,
+            };
+          }
+
         default:
           throw PostgrestException(
             message: 'Unsupported Developer action: $action',
@@ -9928,6 +12625,7 @@ class FirestoreFunctionsClient {
     switch (action) {
       case 'admin.get_due_popups':
         {
+          await _client.purgeExpiredCloudStorageAndMessages();
           final msgSnap = await _db
               .collection('developer_messages')
               .where('display_date', isEqualTo: today)
@@ -10017,7 +12715,288 @@ class FirestoreFunctionsClient {
             }
           }
 
+          // Check school leave popups:
+          // 1) For Admin: show popup on EVERY start while any leave request is pending
+          // 2) For Teacher: show popup ONCE after their leave request is approved or rejected
+          try {
+            final allSchoolLeaves = await _client._cachedSchoolTableRows(
+              'teacher_leaves',
+              schoolRef,
+            );
+            if (ctx.isAdmin) {
+              final pendingLeaves = allSchoolLeaves.where((l) {
+                final st = '${l['status'] ?? 'pending'}'.trim().toLowerCase();
+                return st == 'pending';
+              }).toList();
+              if (pendingLeaves.isNotEmpty) {
+                pendingLeaves.sort(
+                  (a, b) => '${b['start_date'] ?? ''}'.compareTo(
+                    '${a['start_date'] ?? ''}',
+                  ),
+                );
+                final lines = <String>[
+                  'તમારી શાળામાં ${pendingLeaves.length} રજા અરજી મંજૂર અથવા નામંજૂર કરવાની બાકી છે:',
+                  '',
+                ];
+                for (var i = 0; i < pendingLeaves.length; i++) {
+                  final l = pendingLeaves[i];
+                  final ld = l['leave_data'] is Map
+                      ? Map<String, dynamic>.from(l['leave_data'] as Map)
+                      : <String, dynamic>{};
+                  final tName =
+                      '${ld['teacher_name'] ?? 'શિક્ષક'}'.trim();
+                  final tClass = '${ld['teacher_class'] ?? ''}'.trim();
+                  final lType = '${l['leave_type'] ?? ''}'.trim();
+                  final sDate = '${l['start_date'] ?? ''}'.trim();
+                  final eDate = '${l['end_date'] ?? sDate}'.trim();
+                  final days = '${ld['total_days'] ?? ''}'.trim();
+                  final chargeName =
+                      '${ld['charge_teacher_name'] ?? ''}'.trim();
+                  final reason = '${l['reason'] ?? ''}'.trim();
+                  lines.add(
+                    '${i + 1}. $tName${tClass.isNotEmpty && tClass != '—' ? ' (ધોરણ: $tClass)' : ''}\n'
+                    '   • રજા: $lType ($sDate થી $eDate${days.isNotEmpty ? ' • $days દિવસ' : ''})\n'
+                    '   • ચાર્જ શિક્ષક: ${chargeName.isEmpty ? '—' : chargeName}'
+                    '${reason.isEmpty ? '' : '\n   • કારણ: $reason'}',
+                  );
+                }
+                lines.add('');
+                lines.add(
+                  'નોંધ: જ્યાં સુધી આ રજા અરજી મંજૂર (Approve) કે નામંજૂર (Reject) કરવામાં નહીં આવે ત્યાં સુધી એપ શરૂ કરતી વખતે આ નોટિફિકેશન દેખાશે.',
+                );
+                popups.add(<String, dynamic>{
+                  'kind': 'admin_pending_leaves',
+                  'pendingCount': pendingLeaves.length,
+                  'title':
+                      '🔔 રજા મંજૂરી બાકી (${pendingLeaves.length} Pending Leave Request${pendingLeaves.length == 1 ? '' : 's'})',
+                  'message': lines.join('\n'),
+                });
+              }
+            } else {
+              for (final l in allSchoolLeaves) {
+                if ('${l['teacher_id'] ?? ''}'.trim() != ctx.teacherId) {
+                  continue;
+                }
+                if ('${l['record_source'] ?? 'teacher_application'}'.trim() ==
+                    'admin_manual') {
+                  continue;
+                }
+                final st = '${l['status'] ?? ''}'.trim().toLowerCase();
+                if (st != 'approved' && st != 'rejected') continue;
+                final ld = l['leave_data'] is Map
+                    ? Map<String, dynamic>.from(l['leave_data'] as Map)
+                    : <String, dynamic>{};
+                final unnotified =
+                    l['teacher_decision_notified'] == false ||
+                    ld['teacher_decision_notified'] == false;
+                if (!unnotified) continue;
+
+                final lid = '${l['id'] ?? ''}'.trim();
+                if (lid.isEmpty) continue;
+                final isApproved = st == 'approved';
+                final lType = '${l['leave_type'] ?? 'રજા'}'.trim();
+                final sDate = '${l['start_date'] ?? ''}'.trim();
+                final eDate = '${l['end_date'] ?? sDate}'.trim();
+                final days = '${ld['total_days'] ?? ''}'.trim();
+                final chargeName = '${ld['charge_teacher_name'] ?? ''}'.trim();
+                final note = '${l['decision_note'] ?? ''}'.trim();
+                final msgLines = <String>[
+                  isApproved
+                      ? 'તમારી રજાની અરજી શાળા Admin દ્વારા મંજૂર (Approved) કરવામાં આવી છે.'
+                      : 'તમારી રજાની અરજી શાળા Admin દ્વારા નામંજૂર (Rejected) કરવામાં આવી છે.',
+                  '',
+                  '• રજાનો પ્રકાર: $lType',
+                  '• તારીખ: $sDate થી $eDate${days.isNotEmpty ? ' ($days દિવસ)' : ''}',
+                  if (chargeName.isNotEmpty) '• ચાર્જ શિક્ષક: $chargeName',
+                  if (note.isNotEmpty) '• Admin નોંધ: $note',
+                ];
+                popups.add(<String, dynamic>{
+                  'kind': 'teacher_leave_decision',
+                  'leaveId': lid,
+                  'status': st,
+                  'title': isApproved
+                      ? '✅ રજા અરજી મંજૂર (Leave Approved)'
+                      : '❌ રજા અરજી નામંજૂર (Leave Rejected)',
+                  'message': msgLines.join('\n'),
+                });
+              }
+            }
+          } catch (_) {}
+
+          // 3) Daily PM POSHAN & Breakfast Menu popup (Monday–Saturday, once per day per user)
+          try {
+            final menuDoc = await _client._cachedDocData(
+              'school_weekly_meal_menus',
+              schoolRef,
+            );
+            if (menuDoc != null && menuDoc['enabled'] != false) {
+              final todayDt = DateTime.tryParse(today);
+              final weekday = todayDt?.weekday ?? 0; // 1=Mon .. 6=Sat, 7=Sun
+              if (weekday >= 1 && weekday <= 6) {
+                final daysMap = menuDoc['days'] is Map
+                    ? Map<String, dynamic>.from(menuDoc['days'] as Map)
+                    : <String, dynamic>{};
+                final dayEntry = daysMap['$weekday'] is Map
+                    ? Map<String, dynamic>.from(daysMap['$weekday'] as Map)
+                    : <String, dynamic>{};
+                final pmItem = '${dayEntry['pm_poshan_item'] ?? ''}'.trim();
+                final pmIng =
+                    '${dayEntry['pm_poshan_ingredients'] ?? ''}'.trim();
+                final bfItem = '${dayEntry['breakfast_item'] ?? ''}'.trim();
+                final bfIng =
+                    '${dayEntry['breakfast_ingredients'] ?? ''}'.trim();
+                if (pmItem.isNotEmpty || bfItem.isNotEmpty) {
+                  final dismissDocId =
+                      '${schoolRef}__${ctx.authUserId}__$today';
+                  final dSnap = await _db
+                      .collection('school_meal_menu_dismissals')
+                      .doc(dismissDocId)
+                      .get();
+                  if (!dSnap.exists) {
+                    const dayNamesGu = <int, String>{
+                      1: 'સોમવાર (Monday)',
+                      2: 'મંગળવાર (Tuesday)',
+                      3: 'બુધવાર (Wednesday)',
+                      4: 'ગુરુવાર (Thursday)',
+                      5: 'શુક્રવાર (Friday)',
+                      6: 'શનિવાર (Saturday)',
+                    };
+                    final lines = <String>[
+                      '📅 આજનો વાર: ${dayNamesGu[weekday] ?? ''}',
+                      '',
+                    ];
+                    if (bfItem.isNotEmpty) {
+                      lines.add('🥣 અલ્પાહાર (Breakfast): $bfItem');
+                      if (bfIng.isNotEmpty) {
+                        lines.add('   સામગ્રી અને જથ્થો: $bfIng');
+                      }
+                      lines.add('');
+                    }
+                    if (pmItem.isNotEmpty) {
+                      lines.add('🍲 PM POSHAN (મધ્યાહન ભોજન): $pmItem');
+                      if (pmIng.isNotEmpty) {
+                        lines.add('   સામગ્રી અને જથ્થો: $pmIng');
+                      }
+                    }
+                    popups.add(<String, dynamic>{
+                      'kind': 'daily_meal_menu',
+                      'menuDate': today,
+                      'title': '🍽️ આજનું PM POSHAN અને અલ્પાહાર મેનુ',
+                      'message': lines.join('\n').trim(),
+                    });
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+
+          // 4) Continuous Absence Milestone Popups (student-wise attendance only, once per spell)
+          try {
+            final absRes = await _client._computeStudentAbsenceStreaksAndAlerts(
+              schoolRef: schoolRef,
+              ctx: ctx,
+              roleScope: ctx.isAdmin ? 'admin' : 'teacher',
+            );
+            final dueList = (absRes['due_milestones'] as List? ?? const [])
+                .whereType<Map>()
+                .map((m) => m.map((k, v) => MapEntry('$k', v)))
+                .toList();
+            if (dueList.isNotEmpty) {
+              final ackKeys = <String>[];
+              final lines = <String>[
+                ctx.isAdmin
+                    ? 'નીચેના વિદ્યાર્થીઓ સતત ગેરહાજર છે (વર્ગવાર student-wise હાજરી મુજબ):'
+                    : 'તમારા વર્ગના નીચેના વિદ્યાર્થીઓ સતત ગેરહાજર છે:',
+                '',
+              ];
+              for (var i = 0; i < dueList.length; i++) {
+                final item = dueList[i];
+                final ackKey = '${item['ack_key'] ?? ''}'.trim();
+                if (ackKey.isNotEmpty) ackKeys.add(ackKey);
+                final stName = '${item['student_name'] ?? ''}'.trim();
+                final rollNo = '${item['roll_number'] ?? ''}'.trim();
+                final clsLabel = '${item['class_label'] ?? ''}'.trim();
+                final mDays = item['milestone'] ?? 0;
+                final actionGu = '${item['action_message_gu'] ?? ''}'.trim();
+                lines.add(
+                  '${i + 1}. $stName${rollNo.isNotEmpty ? ' (રોલ નં. $rollNo)' : ''} — $clsLabel\n'
+                  '   • સતત ગેરહાજર: $mDays દિવસ\n'
+                  '   • સૂચના: $actionGu',
+                );
+              }
+              popups.add(<String, dynamic>{
+                'kind': 'absence_milestone_alert',
+                'ackKeys': ackKeys,
+                'title':
+                    '⚠️ સતત ગેરહાજર વિદ્યાર્થી સૂચના (${dueList.length})',
+                'message': lines.join('\n'),
+              });
+            }
+          } catch (_) {}
+
           return <String, dynamic>{'popups': popups, 'serverDate': today};
+        }
+
+      case 'admin.dismiss_daily_meal_menu':
+        {
+          final mDate = '${body['menuDate'] ?? today}'.trim();
+          final docId = '${schoolRef}__${ctx.authUserId}__$mDate';
+          await _db.collection('school_meal_menu_dismissals').doc(docId).set(
+            <String, dynamic>{
+              'id': docId,
+              'school_ref': schoolRef,
+              'auth_user_id': ctx.authUserId,
+              'menu_date': mDate,
+              'dismissed_at': nowIso,
+            },
+          );
+          return <String, dynamic>{'ok': true};
+        }
+
+      case 'admin.dismiss_absence_milestone_alert':
+        {
+          final rawKeys = body['ackKeys'];
+          final keys = rawKeys is Iterable
+              ? rawKeys.map((e) => '$e'.trim()).where((s) => s.isNotEmpty).toList()
+              : <String>[];
+          var batch = _db.batch();
+          var ops = 0;
+          for (final k in keys) {
+            batch.set(
+              _db.collection('student_absence_alert_acks').doc(k),
+              <String, dynamic>{
+                'id': k,
+                'school_ref': schoolRef,
+                'acked_at': nowIso,
+              },
+              fs.SetOptions(merge: true),
+            );
+            ops++;
+            if (ops >= 400) {
+              await batch.commit();
+              batch = _db.batch();
+              ops = 0;
+            }
+          }
+          if (ops > 0) await batch.commit();
+          FirestoreQueryBuilder.invalidateCache('student_absence_alert_acks');
+          return <String, dynamic>{'ok': true, 'acked': keys.length};
+        }
+
+      case 'admin.dismiss_teacher_leave_decision':
+        {
+          final leaveId = '${body['leaveId'] ?? ''}'.trim();
+          if (leaveId.isNotEmpty) {
+            await _db.collection('teacher_leaves').doc(leaveId).set(
+              <String, dynamic>{
+                'teacher_decision_notified': true,
+                'updated_at': nowIso,
+              },
+              fs.SetOptions(merge: true),
+            );
+            FirestoreQueryBuilder.invalidateCache('teacher_leaves');
+          }
+          return <String, dynamic>{'ok': true};
         }
 
       case 'admin.dismiss_developer_message':
@@ -10081,6 +13060,12 @@ class FirestoreFunctionsClient {
               'is_active': school['is_active'] == true,
               'is_blocked': isBlocked,
               'block_reason': '${school['block_reason'] ?? ''}',
+              'disabled_modules': school['disabled_modules'] is Iterable
+                  ? (school['disabled_modules'] as Iterable)
+                        .map((e) => '$e'.trim().toLowerCase())
+                        .where((v) => v.isNotEmpty)
+                        .toList()
+                  : const <String>[],
             },
             'can_edit': school['is_active'] == true && !isBlocked,
             'can_download_reports': school['is_active'] == true,

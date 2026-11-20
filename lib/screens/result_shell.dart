@@ -34,6 +34,8 @@ import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
 import '../widgets/dialogs.dart';
 import 'setup_screen.dart';
+import 'supabase_patrak_a_screen.dart';
+import 'supabase_whole_school_result_summary_screen.dart';
 import '../services/certificate_service.dart';
 import 'package:pmshri_attendance/services/class_label.dart';
 import '../theme/responsive.dart';
@@ -1668,8 +1670,9 @@ class _ResultShellState extends State<ResultShell> {
     required String sub,
     required String targetSem,
   }) async {
+    final targetLocked = targetSem == '1' ? _sem1Locked : _sem2Locked;
     final canEdit =
-        (!_isCurrentSemLocked || context.read<AppState>().isAdmin) &&
+        (!targetLocked || context.read<AppState>().isAdmin) &&
             _canUseResultEntry;
     if (!canEdit) return;
     final semMap = targetSem == '1' ? st.sem1 : st.sem2;
@@ -2156,6 +2159,12 @@ class _ResultShellState extends State<ResultShell> {
       _rosterSnapshotStatus[_activeRosterSemester]?['current'] is Map;
   bool get _canUseResultEntry =>
       _hasCurrentRosterSnapshot && !_rosterStatusLoading && !_rosterActionBusy;
+  bool get _isActiveRosterSemLocked =>
+      _activeRosterSemester == 1 ? _sem1Locked : _sem2Locked;
+  bool _lockTabLoading = false;
+  bool _lockTabBusy = false;
+  String? _lockTabError;
+  List<Map<String, dynamic>> _schoolLockRows = <Map<String, dynamic>>[];
 
   String _currentResultDirtyScope() {
     if (_activeTab == 1 || _activeTab == 2) return '__STUDENT_PROFILES__';
@@ -2554,6 +2563,14 @@ class _ResultShellState extends State<ResultShell> {
 
   Future<void> _toggleSem1DirectOutOf100() async {
     if (!_isBothSemCombo || _selectedSubject == null) return;
+    if (_sem1Locked && !context.read<AppState>().isAdmin) {
+      showSnack(
+        context,
+        '\u{1F512} \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0ABE \u0A97\u0AC1\u0AA3 \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+        error: true,
+      );
+      return;
+    }
     final hasDirect = _hasStoredDirectSem1Marks;
     if (_useSem1DirectOutOf100 && hasDirect) {
       final confirmed = await showDialog<bool>(
@@ -3628,6 +3645,14 @@ class _ResultShellState extends State<ResultShell> {
   }
 
   void _reshuffleAll40Sentences() {
+    if (_isCurrentSemLocked && !context.read<AppState>().isAdmin) {
+      showSnack(
+        context,
+        '\u{1F512} \u0A86 \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0A97\u0AC1\u0AA3, \u0AB5\u0ACD\u0AAF\u0A95\u0ACD\u0AA4\u0ABF\u0AA4\u0ACD\u0AB5 \u0AB5\u0ABF\u0A95\u0ABE\u0AB8 \u0A95\u0AC7 \u0AB8\u0ACD\u0AA8\u0AC7\u0AAA\u0AB6\u0ACB\u0A9F \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+        error: true,
+      );
+      return;
+    }
     setState(() {
       for (int i = 0; i < _students.length; i++) {
         final st = _students[i];
@@ -3781,6 +3806,14 @@ class _ResultShellState extends State<ResultShell> {
     }
     final semester = _activeRosterSemester;
     final isAdmin = context.read<AppState>().isAdmin;
+    if (_isActiveRosterSemLocked && !isAdmin) {
+      showSnack(
+        context,
+        '\u{1F512} \u0A86 \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0A97\u0AC1\u0AA3, \u0AB5\u0ACD\u0AAF\u0A95\u0ACD\u0AA4\u0ABF\u0AA4\u0ACD\u0AB5 \u0AB5\u0ABF\u0A95\u0ABE\u0AB8 \u0A95\u0AC7 \u0AB8\u0ACD\u0AA8\u0AC7\u0AAA\u0AB6\u0ACB\u0A9F \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+        error: true,
+      );
+      return;
+    }
     if (_modifiedStudents.isNotEmpty) {
       showSnack(context, 'પહેલાં હાલના ફેરફારો સેવ કરો; પછી રજીસ્ટર આયાત કરો.',
           error: true);
@@ -4050,11 +4083,25 @@ class _ResultShellState extends State<ResultShell> {
                   : '📅 હાજરી રજીસ્ટરની તારીખ પસંદ કરો અને વિદ્યાર્થી ડેટા મેળવો (પાસવર્ડ જરૂરી)',
               background: AppColors.teal,
               loading: _rosterActionBusy,
-              onPressed: (_rosterActionBusy || _loading || _saving)
+              onPressed: (_rosterActionBusy ||
+                      _loading ||
+                      _saving ||
+                      (_isActiveRosterSemLocked && !state.isAdmin))
                   ? null
                   : _importRosterFromRegister,
             ),
           ),
+          if (_isActiveRosterSemLocked && !state.isAdmin) ...[
+            const SizedBox(height: 6),
+            Text(
+              '\u{1F512} \u0A86 \u0AB8\u0AA4\u0ACD\u0AB0 \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7 \u2014 \u0AA8\u0AB5\u0ACB \u0AB0\u0A9C\u0AC0\u0AB8\u0ACD\u0A9F\u0AB0 \u0AB8\u0ACD\u0AA8\u0AC7\u0AAA\u0AB6\u0ACB\u0A9F \u0AB2\u0A88 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7 \u0AA8\u0AB9\u0AC0\u0A82 (Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9A\u0ABE\u0AB2\u0AC1 \u0AA5\u0AB6\u0AC7).',
+              style: guFont(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w800,
+                color: AppColors.rose,
+              ),
+            ),
+          ],
           const SizedBox(height: 4),
           Text(
               'જૂના snapshots ક્યારેય ડિલીટ થતા નથી. દ્વિતીય સત્રના રજીસ્ટરમાં નામ ન હોય તો વિદ્યાર્થી પ્રથમ સત્રમાં રહેશે અને દ્વિતીય સત્રમાં “નામ કમી” ગણાશે.',
@@ -4328,9 +4375,17 @@ class _ResultShellState extends State<ResultShell> {
     // A cloud write is never triggered by a timer. Only the visible Save button
     // may call this method; all pre-save edits are held in SharedPreferences.
     if (isAutoSave) return;
-    if (_selectedClass == null || _saving || _activeTab == 4) return;
+    if (_selectedClass == null || _saving || _activeTab == 4 || _activeTab == 6) return;
     final state = context.read<AppState>();
     if (state.resultApi == null) return;
+    if (_isCurrentSemLocked && !state.isAdmin) {
+      showSnack(
+        context,
+        '\u{1F512} \u0A86 \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0A97\u0AC1\u0AA3, \u0AB5\u0ACD\u0AAF\u0A95\u0ACD\u0AA4\u0ABF\u0AA4\u0ACD\u0AB5 \u0AB5\u0ABF\u0A95\u0ABE\u0AB8 \u0A95\u0AC7 \u0AB8\u0ACD\u0AA8\u0AC7\u0AAA\u0AB6\u0ACB\u0A9F \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+        error: true,
+      );
+      return;
+    }
     if (state.resultApi is SupabaseResultApiService &&
         !_hasCurrentRosterSnapshot) {
       showSnack(context,
@@ -4621,6 +4676,14 @@ class _ResultShellState extends State<ResultShell> {
   }
 
   Future<void> _pasteFromExcel() async {
+    if (_isCurrentSemLocked && !context.read<AppState>().isAdmin) {
+      showSnack(
+        context,
+        '\u{1F512} \u0A86 \u0AB8\u0AA4\u0ACD\u0AB0\u0AA8\u0AC1\u0A82 \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7\u0AB2 \u0A9B\u0AC7. Admin \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AC7 \u0AAA\u0A9B\u0AC0 \u0A9C \u0A97\u0AC1\u0AA3, \u0AB5\u0ACD\u0AAF\u0A95\u0ACD\u0AA4\u0ABF\u0AA4\u0ACD\u0AB5 \u0AB5\u0ABF\u0A95\u0ABE\u0AB8 \u0A95\u0AC7 \u0AB8\u0ACD\u0AA8\u0AC7\u0AAA\u0AB6\u0ACB\u0A9F \u0AAC\u0AA6\u0AB2\u0AC0 \u0AB6\u0A95\u0ABE\u0AB6\u0AC7.',
+        error: true,
+      );
+      return;
+    }
     if (_activeTab == 0 && _selectedSubject == null) {
       showSnack(
           context, 'પહેલાં ફાળવેલ વિષય અથવા વર્ગશિક્ષક મૂલ્યાંકન પસંદ કરો.',
@@ -8629,7 +8692,32 @@ class _ResultShellState extends State<ResultShell> {
                 fontWeight: FontWeight.w800,
                 color: AppColors.navy),
           ),
-          actions: const [],
+          actions: [
+            if (state.isAdmin)
+              Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF0B2D5B),
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => SupabaseWholeSchoolResultSummaryScreen(
+                          initialSemester: _selectedSem.contains('2') ? '2' : '1',
+                        ),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.analytics_outlined, size: 18),
+                  label: const Text(
+                    'સમગ્ર શાળાનું પરિણામ સારાંશ (All 3 Formats)',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12),
+                  ),
+                ),
+              ),
+          ],
         ),
         body: Stack(
           children: [
@@ -8667,7 +8755,7 @@ class _ResultShellState extends State<ResultShell> {
                               ],
                               const SizedBox(height: 14),
                               const SizedBox(height: 14),
-                              if (_activeTab != 4)
+                              if (_activeTab != 4 && _activeTab != 6)
                                 _buildSelectors(allowed, state),
                               if (_activeTab == 0 &&
                                   _isRegularSubjectSelected) ...[
@@ -8693,7 +8781,7 @@ class _ResultShellState extends State<ResultShell> {
                                       'કુલ ગુણ દાખલ કરતા જ 40 વિધાનોમાં આપોઆપ રેન્ડમ ગુણ વહેંચાઈ જશે.',
                                 ),
                               ],
-                              if (state.isAdmin) ...[
+                              if (state.isAdmin && _activeTab != 6) ...[
                                 const SizedBox(height: 10),
                                 _buildFrontPageMetaEditor(),
                               ],
@@ -8702,7 +8790,7 @@ class _ResultShellState extends State<ResultShell> {
                                 const SizedBox(height: 8),
                                 _buildClass3And4Sem2OnlyToggle(),
                               ],
-                              if (_activeTab != 3 && _activeTab != 4) ...[
+                              if (_activeTab != 3 && _activeTab != 4 && _activeTab != 6) ...[
                                 const SizedBox(height: 12),
                                 Wrap(
                                   spacing: 10,
@@ -8741,6 +8829,8 @@ class _ResultShellState extends State<ResultShell> {
                                       background: AppColors.teal,
                                       onPressed: (_saving ||
                                               _loading ||
+                                              (_isCurrentSemLocked &&
+                                                  !state.isAdmin) ||
                                               !_canUseResultEntry ||
                                               _selectedSubject == null)
                                           ? null
@@ -8753,6 +8843,8 @@ class _ResultShellState extends State<ResultShell> {
                                         background: AppColors.navyMid,
                                         onPressed: (_loading ||
                                                 _students.isEmpty ||
+                                                (_isCurrentSemLocked &&
+                                                    !state.isAdmin) ||
                                                 !_canUseResultEntry)
                                             ? null
                                             : _reshuffleAll40Sentences,
@@ -8945,7 +9037,14 @@ class _ResultShellState extends State<ResultShell> {
                                 ),
                               ],
                               const SizedBox(height: 14),
-                              if (_loading)
+                              if (_activeTab == 6)
+                                _buildResultLockManagerTab(state)
+                              else if (_activeTab == 5)
+                                SupabasePatrakAView(
+                                  initialClassKey: _selectedClass,
+                                  initialSemester: _selectedSem == '1' ? 1 : 2,
+                                )
+                              else if (_loading)
                                 const LoadingState()
                               else if (_activeTab == 4)
                                 _buildGradeSettingsTab()
@@ -8970,6 +9069,8 @@ class _ResultShellState extends State<ResultShell> {
                                 _buildFullInlineMasterTableWithStickyName(),
                               if (!_loading &&
                                   _activeTab != 4 &&
+                                  _activeTab != 5 &&
+                                  _activeTab != 6 &&
                                   (_activeTab == 3 ||
                                       _students.isNotEmpty)) ...[
                                 const SizedBox(height: 16),
@@ -9014,6 +9115,16 @@ class _ResultShellState extends State<ResultShell> {
     // are performed in the Student Database and then loaded through the roster.
     final tabs = <(int, String)>[
       (0, '📝 ગુણ એન્ટ્રી'),
+      (5, '📋 પત્રક - A (Patrak A)'),
+    ];
+    final isAdmin = context.watch<AppState>().isAdmin;
+    final visibleTabs = <(int, String)>[
+      ...tabs,
+      if (isAdmin)
+        (
+          6,
+          '\u{1F512} \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 (Result Lock)',
+        ),
     ];
     return Container(
       width: double.infinity,
@@ -9023,7 +9134,7 @@ class _ResultShellState extends State<ResultShell> {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: AppColors.border)),
       child: Wrap(spacing: 6, runSpacing: 6, children: [
-        for (final tab in tabs)
+        for (final tab in visibleTabs)
           ChoiceChip(
             label: Text(tab.$2,
                 style: guFont(
@@ -9032,19 +9143,420 @@ class _ResultShellState extends State<ResultShell> {
                     color:
                         _activeTab == tab.$1 ? Colors.white : AppColors.navy)),
             selected: _activeTab == tab.$1,
-            selectedColor: AppColors.navy,
+            selectedColor: tab.$1 == 6 ? AppColors.rose : AppColors.navy,
             backgroundColor: Colors.white,
-            onSelected: !_canUseResultEntry
+            onSelected: (tab.$1 != 5 && tab.$1 != 6 && !_canUseResultEntry)
                 ? null
                 : (selected) {
                     if (!selected) return;
                     setState(() {
-                      _activeTab = 0;
+                      _activeTab = tab.$1;
                       _gridTick++;
                     });
+                    if (tab.$1 == 6) {
+                      unawaited(_loadSchoolResultLockMatrix());
+                    }
                   },
           ),
       ]),
+    );
+  }
+
+  Future<void> _loadSchoolResultLockMatrix() async {
+    final api = context.read<AppState>().resultApi;
+    if (api is! SupabaseResultApiService) return;
+    if (mounted) {
+      setState(() {
+        _lockTabLoading = true;
+        _lockTabError = null;
+      });
+    }
+    try {
+      final rows = await api.getSchoolResultLockStatus();
+      if (!mounted) return;
+      setState(() {
+        _schoolLockRows = rows;
+        _lockTabLoading = false;
+        _lockTabError = null;
+        for (final r in rows) {
+          if ('${r['classKey']}' == _selectedClass ||
+              '${r['displayLabel']}' == _cleanClassCode) {
+            _sem1Locked = r['sem1Locked'] == true;
+            _sem2Locked = r['sem2Locked'] == true;
+            break;
+          }
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _lockTabLoading = false;
+        _lockTabError = '$error';
+      });
+    }
+  }
+
+  Future<void> _applySchoolResultLockChange({
+    required int semester,
+    required bool isLocked,
+    String? classId,
+    String? classLabel,
+  }) async {
+    final state = context.read<AppState>();
+    if (!state.isAdmin) return;
+    final api = state.resultApi;
+    if (api is! SupabaseResultApiService) return;
+
+    final isWholeSchool = classId == null || classId.trim().isEmpty;
+    if (isWholeSchool) {
+      final semText = semester == 1
+          ? '\u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0 (Semester 1)'
+          : '\u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0 / \u0AB5\u0ABE\u0AB0\u0ACD\u0AB7\u0ABF\u0A95 (Semester 2)';
+      final actionText = isLocked
+          ? '\u{1F512} \u0AB2\u0ACB\u0A95 (Lock)'
+          : '\u{1F513} \u0A85\u0AA8\u0AB2\u0ACB\u0A95 (Unlock)';
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dCtx) => AlertDialog(
+          title: Text(
+            '$actionText - $semText',
+            style: guFont(
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+              color: isLocked ? AppColors.rose : AppColors.greenDeep,
+            ),
+          ),
+          content: Text(
+            'Whole School (${_schoolLockRows.length} classes): $semText -> $actionText?',
+            style: guFont(fontSize: 13.5, fontWeight: FontWeight.w700),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dCtx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor:
+                    isLocked ? AppColors.rose : AppColors.greenDeep,
+              ),
+              onPressed: () => Navigator.pop(dCtx, true),
+              child: Text(actionText),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
+    setState(() {
+      _lockTabBusy = true;
+      _lockTabError = null;
+    });
+    try {
+      final res = await api.setSchoolResultLock(
+        semester: semester,
+        isLocked: isLocked,
+        classId: classId,
+      );
+      if (!mounted) return;
+      if (res['result'] != 'success') {
+        setState(() {
+          _lockTabBusy = false;
+          _lockTabError = '${res['message'] ?? 'Update failed'}';
+        });
+        return;
+      }
+      await _loadSchoolResultLockMatrix();
+      if (!mounted) return;
+      setState(() => _lockTabBusy = false);
+      final scopeName =
+          isWholeSchool ? 'Whole School (${res['updatedCount']}/${res['totalClasses']} updated)' : (classLabel ?? 'Class');
+      final stWord = isLocked ? 'LOCKED' : 'UNLOCKED';
+      showSnack(context, '$scopeName - Sem $semester $stWord');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _lockTabBusy = false;
+        _lockTabError = '$error';
+      });
+    }
+  }
+
+  Widget _buildResultLockManagerTab(AppState state) {
+    if (!state.isAdmin) {
+      return const MessageState(
+        text:
+            '\u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95/\u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AB5\u0ABE\u0AA8\u0ACB \u0A85\u0AA7\u0ABF\u0A95\u0ABE\u0AB0 \u0AAE\u0ABE\u0AA4\u0ACD\u0AB0 School Admin \u0AAA\u0ABE\u0AB8\u0AC7 \u0A9B\u0AC7.',
+      );
+    }
+    final total = _schoolLockRows.length;
+    final sem1LockedCount =
+        _schoolLockRows.where((r) => r['sem1Locked'] == true).length;
+    final sem2LockedCount =
+        _schoolLockRows.where((r) => r['sem2Locked'] == true).length;
+
+    Widget statusPill(bool locked) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: locked ? AppColors.roseLight : const Color(0xFFDCFCE7),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: locked ? AppColors.rose : AppColors.greenDeep,
+            ),
+          ),
+          child: Text(
+            locked
+                ? '\u{1F512} \u0AB2\u0ACB\u0A95 (Locked)'
+                : '\u{1F513} \u0A96\u0AC1\u0AB2\u0ACD\u0AB2\u0AC1\u0A82 (Open)',
+            style: guFont(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+              color: locked ? AppColors.rose : AppColors.greenDeep,
+            ),
+          ),
+        );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '\u{1F512} \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AB2\u0ACB\u0A95 / \u0A85\u0AA8\u0AB2\u0ACB\u0A95 \u0AAE\u0AC7\u0AA8\u0AC7\u0A9C\u0AB0 (Admin Only)',
+                style: guFont(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w900,
+                  color: AppColors.navy,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: (_lockTabLoading || _lockTabBusy)
+                  ? null
+                  : _loadSchoolResultLockMatrix,
+              icon: const Icon(Icons.refresh, size: 17),
+              label: Text(
+                '\u{1F504} \u0AB0\u0ABF\u0AAB\u0ACD\u0AB0\u0AC7\u0AB6',
+                style: guFont(fontSize: 12, fontWeight: FontWeight.w800),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFFBEB),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: AppColors.gold),
+          ),
+          child: Text(
+            '\u0AB2\u0ACB\u0A95 \u0A95\u0AB0\u0AB5\u0ABE\u0AA5\u0AC0 \u0AB6\u0ABF\u0A95\u0ACD\u0AB7\u0A95\u0ACB \u0AAE\u0ABE\u0A9F\u0AC7 \u0AAE\u0ABE\u0AA4\u0ACD\u0AB0 \u0A86 \u0AE9 \u0AAC\u0ABE\u0AAC\u0AA4\u0ACB \u0AAC\u0A82\u0AA7 \u0AA5\u0AB6\u0AC7: (1) \u0AB5\u0ABF\u0AA6\u0ACD\u0AAF\u0ABE\u0AB0\u0ACD\u0AA5\u0AC0\u0AA8\u0ABE \u0A97\u0AC1\u0AA3 \u0A8F\u0AA8\u0ACD\u0A9F\u0ACD\u0AB0\u0AC0/\u0AAB\u0AC7\u0AB0\u0AAB\u0ABE\u0AB0, (2) \u0AAA\u0AB0\u0ABF\u0AA3\u0ABE\u0AAE \u0AAE\u0ABE\u0A9F\u0AC7 \u0AA8\u0AB5\u0ACB \u0AB0\u0A9C\u0AC0\u0AB8\u0ACD\u0A9F\u0AB0 \u0AB8\u0ACD\u0AA8\u0AC7\u0AAA\u0AB6\u0ACB\u0A9F, (3) \u0AB5\u0ACD\u0AAF\u0A95\u0ACD\u0AA4\u0ABF\u0AA4\u0ACD\u0AB5 \u0AB5\u0ABF\u0A95\u0ABE\u0AB8\u0AA8\u0ABE \u0A97\u0AC1\u0AA3\u0AAE\u0ABE\u0A82 \u0AAB\u0AC7\u0AB0\u0AAB\u0ABE\u0AB0. \u0AAA\u0ACD\u0AB0\u0ABF\u0AA8\u0ACD\u0A9F, PDF \u0A85\u0AA8\u0AC7 Excel \u0AB9\u0A82\u0AAE\u0AC7\u0AB6\u0ABE \u0A9A\u0ABE\u0AB2\u0AC1 \u0AB0\u0AB9\u0AC7\u0AB6\u0AC7.',
+            style: guFont(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: AppColors.navy,
+            ),
+          ),
+        ),
+        if (_lockTabLoading || _lockTabBusy) ...[
+          const SizedBox(height: 8),
+          const LinearProgressIndicator(),
+        ],
+        if (_lockTabError != null) ...[
+          const SizedBox(height: 8),
+          AlertBox(kind: AlertKind.error, text: _lockTabError!),
+        ],
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  '\u{1F3EB} \u0AB8\u0AAE\u0A97\u0ACD\u0AB0 \u0AB6\u0ABE\u0AB3\u0ABE \u0AAE\u0ABE\u0A9F\u0AC7 \u0A8F\u0A95 \u0AB8\u0ABE\u0AA5\u0AC7 \u0AB2\u0ACB\u0A95 / \u0A85\u0AA8\u0AB2\u0ACB\u0A95 (Whole School)',
+                  style: guFont(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w900,
+                    color: AppColors.navy,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '\u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0 (Semester 1) — Locked: $sem1LockedCount / $total',
+                  style: guFont(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.navyMid,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  children: [
+                    AppButton(
+                      label:
+                          '\u{1F512} \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0 \u0AAC\u0AA7\u0ABE \u0AB5\u0AB0\u0ACD\u0A97 \u0AB2\u0ACB\u0A95',
+                      background: AppColors.rose,
+                      onPressed: (_lockTabBusy || _lockTabLoading || total == 0)
+                          ? null
+                          : () => _applySchoolResultLockChange(
+                                semester: 1,
+                                isLocked: true,
+                              ),
+                    ),
+                    AppButton(
+                      label:
+                          '\u{1F513} \u0AAA\u0ACD\u0AB0\u0AA5\u0AAE \u0AB8\u0AA4\u0ACD\u0AB0 \u0AAC\u0AA7\u0ABE \u0AB5\u0AB0\u0ACD\u0A97 \u0A85\u0AA8\u0AB2\u0ACB\u0A95',
+                      background: AppColors.greenDeep,
+                      onPressed: (_lockTabBusy || _lockTabLoading || total == 0)
+                          ? null
+                          : () => _applySchoolResultLockChange(
+                                semester: 1,
+                                isLocked: false,
+                              ),
+                    ),
+                  ],
+                ),
+                const Divider(height: 22),
+                Text(
+                  '\u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0 / \u0AB5\u0ABE\u0AB0\u0ACD\u0AB7\u0ABF\u0A95 (Semester 2) — Locked: $sem2LockedCount / $total',
+                  style: guFont(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.navyMid,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  children: [
+                    AppButton(
+                      label:
+                          '\u{1F512} \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0 \u0AAC\u0AA7\u0ABE \u0AB5\u0AB0\u0ACD\u0A97 \u0AB2\u0ACB\u0A95',
+                      background: AppColors.rose,
+                      onPressed: (_lockTabBusy || _lockTabLoading || total == 0)
+                          ? null
+                          : () => _applySchoolResultLockChange(
+                                semester: 2,
+                                isLocked: true,
+                              ),
+                    ),
+                    AppButton(
+                      label:
+                          '\u{1F513} \u0AA6\u0ACD\u0AB5\u0ABF\u0AA4\u0AC0\u0AAF \u0AB8\u0AA4\u0ACD\u0AB0 \u0AAC\u0AA7\u0ABE \u0AB5\u0AB0\u0ACD\u0A97 \u0A85\u0AA8\u0AB2\u0ACB\u0A95',
+                      background: AppColors.greenDeep,
+                      onPressed: (_lockTabBusy || _lockTabLoading || total == 0)
+                          ? null
+                          : () => _applySchoolResultLockChange(
+                                semester: 2,
+                                isLocked: false,
+                              ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          '\u{1F4CB} \u0AB5\u0AB0\u0ACD\u0A97 \u0AAE\u0AC1\u0A9C\u0AAC \u0AB2\u0ACB\u0A95 / \u0A85\u0AA8\u0AB2\u0ACB\u0A95 (Class-Wise)',
+          style: guFont(
+            fontSize: 15,
+            fontWeight: FontWeight.w900,
+            color: AppColors.navy,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (_schoolLockRows.isEmpty && !_lockTabLoading)
+          const MessageState(text: 'No active classes found for this school.')
+        else
+          for (final row in _schoolLockRows)
+            Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Wrap(
+                  spacing: 14,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  alignment: WrapAlignment.spaceBetween,
+                  children: [
+                    SizedBox(
+                      width: 190,
+                      child: Text(
+                        '${row['displayLabel']}',
+                        style: guFont(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w900,
+                          color: AppColors.navy,
+                        ),
+                      ),
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Sem 1: ',
+                          style: guFont(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.navyMid,
+                          ),
+                        ),
+                        statusPill(row['sem1Locked'] == true),
+                        Switch(
+                          value: row['sem1Locked'] == true,
+                          activeColor: AppColors.rose,
+                          onChanged: _lockTabBusy
+                              ? null
+                              : (val) => _applySchoolResultLockChange(
+                                    semester: 1,
+                                    isLocked: val,
+                                    classId: '${row['classId']}',
+                                    classLabel: '${row['displayLabel']}',
+                                  ),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Sem 2: ',
+                          style: guFont(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.navyMid,
+                          ),
+                        ),
+                        statusPill(row['sem2Locked'] == true),
+                        Switch(
+                          value: row['sem2Locked'] == true,
+                          activeColor: AppColors.rose,
+                          onChanged: _lockTabBusy
+                              ? null
+                              : (val) => _applySchoolResultLockChange(
+                                    semester: 2,
+                                    isLocked: val,
+                                    classId: '${row['classId']}',
+                                    classLabel: '${row['displayLabel']}',
+                                  ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+      ],
     );
   }
 
@@ -9587,8 +10099,16 @@ class _ResultShellState extends State<ResultShell> {
                 ),
               ),
               for (int i = 0; i < _students.length; i++)
-                _buildFocusedMarksStudentRow(
-                    i, _students[i], sub, isVV, satrantMaxInput),
+                IgnorePointer(
+                  ignoring: _isCurrentSemLocked && !context.read<AppState>().isAdmin,
+                  child: Opacity(
+                    opacity: (_isCurrentSemLocked && !context.read<AppState>().isAdmin)
+                        ? 0.78
+                        : 1.0,
+                    child: _buildFocusedMarksStudentRow(
+                        i, _students[i], sub, isVV, satrantMaxInput),
+                  ),
+                ),
             ],
           ),
         ),
@@ -9759,6 +10279,7 @@ class _ResultShellState extends State<ResultShell> {
               maximum: 100,
               width: fieldWidth * 2 + 10,
               fieldKey: ValueKey('mobile-s1-direct-${st.studentId}-$sub'),
+              enabled: !_sem1Locked || context.read<AppState>().isAdmin,
               onChanged: (value) => setState(() {
                 _markModified(index);
                 st.sem1[sub] = SubjectMarks(
@@ -9777,6 +10298,7 @@ class _ResultShellState extends State<ResultShell> {
             initial: first.patrakA,
             maximum: _maxPatrakA,
             fieldKey: ValueKey('mobile-s1-a-${st.studentId}-$sub'),
+            enabled: !_sem1Locked || context.read<AppState>().isAdmin,
             onChanged: (value) => setState(() {
               _markModified(index);
               st.sem1[sub] =
@@ -9792,6 +10314,7 @@ class _ResultShellState extends State<ResultShell> {
             helper: _examEntryFrom80 ? 'સંગ્રહ 40 માંથી થશે' : null,
             fieldKey: ValueKey(
                 'mobile-s1-s-${st.studentId}-$sub-$_examEntryFrom80-${first.satrantAbsent}'),
+            enabled: !_sem1Locked || context.read<AppState>().isAdmin,
             isSatrantAbsent: first.satrantAbsent,
             onTapAbsent: () => _confirmAndUnlockAbsentStudentSatrant(
               index: index,
@@ -9813,6 +10336,7 @@ class _ResultShellState extends State<ResultShell> {
             initial: first.swaAdhyayan,
             maximum: _maxSwa,
             fieldKey: ValueKey('mobile-s1-sw-${st.studentId}-$sub'),
+            enabled: !_sem1Locked || context.read<AppState>().isAdmin,
             onChanged: (value) => setState(() {
               _markModified(index);
               st.sem1[sub] =
@@ -10004,6 +10528,7 @@ class _ResultShellState extends State<ResultShell> {
                       label: 'વ્યક્તિત્વ વિકાસ • સત્ર 1 ($_vvMaxPerSemester)',
                       initial: st.vv1,
                       maximum: _vvMaxPerSemester,
+                      enabled: !_sem1Locked || context.read<AppState>().isAdmin,
                       onChanged: (value) => setState(() {
                         _markModified(index);
                         _updateStudentVvTotal(st, '1', value);

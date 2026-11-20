@@ -7,10 +7,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/school_class_order.dart';
+import 'supabase_admin_center_screen.dart';
 import '../services/school_name_language_service.dart';
 import '../services/supabase_student_service.dart';
 import '../widgets/school_name_language_selector.dart';
 import '../services/school_type.dart';
+import '../services/attendance_lifecycle.dart';
 import 'package:pmshri_attendance/services/class_label.dart';
 
 /// Supabase-native attendance entry. This screen intentionally does not use the
@@ -22,11 +24,15 @@ class SupabaseAttendanceEntryScreen extends StatefulWidget {
     required this.profile,
     this.readOnly = false,
     this.showAppBar = true,
+    this.initialClassId,
+    this.initialDate,
   });
 
   final Map<String, dynamic> profile;
   final bool readOnly;
   final bool showAppBar;
+  final String? initialClassId;
+  final String? initialDate;
 
   @override
   State<SupabaseAttendanceEntryScreen> createState() =>
@@ -59,6 +65,209 @@ class _SupabaseAttendanceEntryScreenState
   String _date = _today();
   String _mode = 'student';
   List<Map<String, dynamic>> _classes = <Map<String, dynamic>>[];
+  Set<String> _classTeacherClassIds = <String>{};
+  String _attendancePermissionMode = 'subject_and_class_teachers';
+  Map<String, String> _roleByClassId = <String, String>{};
+  Map<String, Map<String, dynamic>> _inChargeInfoByClassId =
+      <String, Map<String, dynamic>>{};
+
+  String _roleForClass(String? classId) {
+    final cid = (classId ?? '').trim();
+    if (cid.isEmpty) return _isAdmin ? 'admin' : 'class_teacher';
+    if (_isAdmin) return 'admin';
+    return _roleByClassId[cid] ??
+        (_classTeacherClassIds.contains(cid)
+            ? 'class_teacher'
+            : 'subject_teacher');
+  }
+
+  Color _roleBgColorForClass(String? classId) {
+    switch (_roleForClass(classId)) {
+      case 'class_teacher':
+        return const Color(0xFFECFDF5); // Subtle Emerald Green
+      case 'in_charge_teacher':
+        return const Color(0xFFFFFBEB); // Subtle Warm Amber
+      case 'section_teacher':
+        return const Color(0xFFEFF6FF); // Subtle Sky Blue
+      case 'subject_teacher':
+      case 'any_teacher':
+        return const Color(0xFFF5F3FF); // Subtle Soft Lavender
+      case 'admin':
+      default:
+        return const Color(0xFFF0FDFA); // Subtle Teal
+    }
+  }
+
+  Color _roleBorderColorForClass(String? classId) {
+    switch (_roleForClass(classId)) {
+      case 'class_teacher':
+        return const Color(0xFF6EE7B7);
+      case 'in_charge_teacher':
+        return const Color(0xFFFCD34D);
+      case 'section_teacher':
+        return const Color(0xFF93C5FD);
+      case 'subject_teacher':
+      case 'any_teacher':
+        return const Color(0xFFC4B5FD);
+      case 'admin':
+      default:
+        return const Color(0xFF5EEAD4);
+    }
+  }
+
+  Color _roleTextColorForClass(String? classId) {
+    switch (_roleForClass(classId)) {
+      case 'class_teacher':
+        return const Color(0xFF065F46);
+      case 'in_charge_teacher':
+        return const Color(0xFF92400E);
+      case 'section_teacher':
+        return const Color(0xFF1E40AF);
+      case 'subject_teacher':
+      case 'any_teacher':
+        return const Color(0xFF5B21B6);
+      case 'admin':
+      default:
+        return const Color(0xFF115E59);
+    }
+  }
+
+  String _shortRoleTagForClass(String? classId) {
+    switch (_roleForClass(classId)) {
+      case 'class_teacher':
+        return 'વર્ગ શિક્ષક';
+      case 'in_charge_teacher':
+        return 'રજા ઇન્ચાર્જ';
+      case 'section_teacher':
+        return 'વિભાગ શિક્ષક';
+      case 'subject_teacher':
+        return 'વિષય શિક્ષક';
+      case 'any_teacher':
+        return 'શાળા શિક્ષક';
+      case 'admin':
+      default:
+        return 'Admin';
+    }
+  }
+
+  String _permissionModeGujaratiSummary() {
+    switch (_attendancePermissionMode) {
+      case 'only_class_teacher':
+        return 'માત્ર વર્ગ શિક્ષક (+ રજા દરમિયાન ઇન્ચાર્જ શિક્ષક)';
+      case 'section_wise_class_teachers':
+        return 'ધોરણના બધા વિભાગના વર્ગ શિક્ષકો: 6A, 6B, 6C... (+ રજા ઇન્ચાર્જ)';
+      case 'any_teacher_all_classes':
+        return 'કોઈપણ શિક્ષક કોઈપણ વર્ગની હાજરી પૂરી શકે';
+      case 'subject_and_class_teachers':
+      default:
+        return 'વર્ગ શિક્ષક + વિભાગ શિક્ષક + વિષય શિક્ષક (+ રજા ઇન્ચાર્જ)';
+    }
+  }
+
+  Widget _buildSelectedClassRoleBadge() {
+    final cid = (_selectedClassId ?? '').trim();
+    if (cid.isEmpty) return const SizedBox.shrink();
+    final role = _roleForClass(cid);
+    final info = _inChargeInfoByClassId[cid];
+    final String text;
+    final IconData icon;
+    switch (role) {
+      case 'class_teacher':
+        icon = Icons.verified_user_rounded;
+        text = '🟢 વર્ગ શિક્ષક (Class Teacher) — આ તમારો પોતાનો વર્ગ છે.';
+        break;
+      case 'in_charge_teacher':
+        icon = Icons.assignment_ind_rounded;
+        final tName = _text(info?['on_leave_teacher_name']);
+        final sDate = _text(info?['start_date']);
+        final eDate = _text(info?['end_date']);
+        final rangeTxt = (sDate.isNotEmpty && eDate.isNotEmpty)
+            ? ' ($sDate થી $eDate)'
+            : '';
+        text =
+            '🟠 ઇન્ચાર્જ શિક્ષક — રજા ચાર્જ (In-Charge Teacher): ${tName.isNotEmpty ? "$tName રજા પર હોવાથી" : "રજા ચાર્જ મુજબ"}$rangeTxt માત્ર રજાના સમયગાળા પૂરતી હાજરી પૂરવાની પરવાનગી.';
+        break;
+      case 'section_teacher':
+        icon = Icons.account_tree_rounded;
+        text =
+            '🔵 વિભાગ વર્ગ શિક્ષક (Section-Wise Class Teacher) — તમારા ધોરણના અન્ય વિભાગની હાજરી.';
+        break;
+      case 'subject_teacher':
+        icon = Icons.menu_book_rounded;
+        text =
+            '🟣 વિષય શિક્ષક (Subject Teacher) — તમે આ વર્ગમાં વિષય ભણાવતા હોવાથી હાજરી પૂરી શકો છો.';
+        break;
+      case 'any_teacher':
+        icon = Icons.school_rounded;
+        text =
+            '🟣 શાળા શિક્ષક (All-Class Mode) — Admin પરવાનગી મુજબ કોઈપણ વર્ગની હાજરી નોંધણી.';
+        break;
+      case 'admin':
+      default:
+        icon = Icons.admin_panel_settings_rounded;
+        text =
+            '🛡️ શાળા Admin — તમામ વર્ગોની હાજરી પૂરવાની પરવાનગી (હાલનો નિયમ: ${_permissionModeGujaratiSummary()}).';
+        break;
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: _roleBorderColorForClass(cid).withValues(alpha: 0.85),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 17, color: _roleTextColorForClass(cid)),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: _roleTextColorForClass(cid),
+              ),
+            ),
+          ),
+          if (_isAdmin && !widget.readOnly) ...[
+            const SizedBox(width: 6),
+            TextButton.icon(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                backgroundColor: const Color(0xFFCCFBF1),
+                foregroundColor: const Color(0xFF115E59),
+              ),
+              onPressed: () async {
+                await Navigator.of(context).push<void>(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SupabaseAttendancePermissionScreen(),
+                  ),
+                );
+                if (mounted) _loadInitial();
+              },
+              icon: const Icon(Icons.settings_outlined, size: 15),
+              label: const Text(
+                'હાજરી પરવાનગી બદલો (4 Modes)',
+                style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  bool get _canManageSelectedClassStudents {
+    if (widget.readOnly) return false;
+    if (_isAdmin) return true;
+    final cid = (_selectedClassId ?? '').trim();
+    if (cid.isEmpty) return false;
+    return _classTeacherClassIds.contains(cid);
+  }
   List<_AttendanceStudent> _students = <_AttendanceStudent>[];
   Map<String, dynamic>? _day;
   String? _statusMessage;
@@ -361,6 +570,93 @@ class _SupabaseAttendanceEntryScreenState
     return genders;
   }
 
+  Future<
+    ({
+      String permissionMode,
+      List<Map<String, dynamic>> classes,
+      Set<String> classTeacherIds,
+      Map<String, String> roleByClassId,
+      Map<String, Map<String, dynamic>> inChargeInfoByClassId,
+    })
+  > _fetchAttendanceAccessPayload({
+    required String schoolRef,
+    required String dateIso,
+  }) async {
+    try {
+      final raw = await _client.rpc(
+        'psm_get_attendance_entry_access',
+        params: <String, dynamic>{'p_attendance_date': dateIso},
+      );
+      if (raw is Map) {
+        final map = _asMap(raw);
+        final mode = _text(map['permission_mode']).isEmpty
+            ? 'subject_and_class_teachers'
+            : _text(map['permission_mode']);
+        final rawClasses = map['classes'] is List
+            ? (map['classes'] as List)
+                  .whereType<Map>()
+                  .map((r) => r.map((k, v) => MapEntry('$k', v)))
+                  .toList()
+            : <Map<String, dynamic>>[];
+        final sortedClasses = SchoolClassOrder.sorted(rawClasses);
+        final ctIds = map['class_teacher_ids'] is List
+            ? (map['class_teacher_ids'] as List)
+                  .map((e) => '$e'.trim())
+                  .where((s) => s.isNotEmpty)
+                  .toSet()
+            : <String>{};
+        final roleMap = <String, String>{};
+        if (map['role_by_class_id'] is Map) {
+          (map['role_by_class_id'] as Map).forEach((k, v) {
+            roleMap['$k'.trim()] = '$v'.trim();
+          });
+        }
+        final chargeMap = <String, Map<String, dynamic>>{};
+        if (map['in_charge_info_by_class_id'] is Map) {
+          (map['in_charge_info_by_class_id'] as Map).forEach((k, v) {
+            if (v is Map) {
+              chargeMap['$k'.trim()] =
+                  v.map((ck, cv) => MapEntry('$ck', cv));
+            }
+          });
+        }
+        return (
+          permissionMode: mode,
+          classes: sortedClasses,
+          classTeacherIds: ctIds,
+          roleByClassId: roleMap,
+          inChargeInfoByClassId: chargeMap,
+        );
+      }
+    } catch (_) {}
+
+    // Fallback if RPC is unavailable
+    final rows = await _client
+        .from('school_classes')
+        .select(
+          'id,school_ref,class_key,label,sheet_name,standard,section,report_group,sort_order,is_active',
+        )
+        .eq('school_ref', schoolRef)
+        .eq('is_active', true)
+        .order('sort_order')
+        .order('label');
+    final sorted = SchoolClassOrder.sorted(
+      rows.map((row) => Map<String, dynamic>.from(row)),
+    );
+    return (
+      permissionMode: 'subject_and_class_teachers',
+      classes: sorted,
+      classTeacherIds: _isAdmin
+          ? sorted.map((c) => '${c['id']}').toSet()
+          : <String>{},
+      roleByClassId: <String, String>{
+        for (final c in sorted)
+          '${c['id']}': _isAdmin ? 'admin' : 'class_teacher',
+      },
+      inChargeInfoByClassId: <String, Map<String, dynamic>>{},
+    );
+  }
+
   Future<void> _loadInitial() async {
     setState(() {
       _loading = true;
@@ -387,7 +683,6 @@ class _SupabaseAttendanceEntryScreenState
       final dateToUse = _indiaToday();
       final modeToUse = savedMode == 'direct' ? 'direct' : 'student';
 
-      FirestoreQueryBuilder.invalidateCache('school_settings');
       final settingsRow = await _client
           .from('school_settings')
           .select('config')
@@ -402,35 +697,35 @@ class _SupabaseAttendanceEntryScreenState
       final directEntryEnabled = settingsConfig['direct_attendance_entry_enabled'] != false;
       final effectiveInitialMode = !directEntryEnabled ? 'student' : modeToUse;
 
-      final rows = await _client
-          .from('school_classes')
-          .select('id,school_ref,class_key,label,sheet_name,standard,section,report_group,sort_order,is_active')
-          .eq('school_ref', schoolRef)
-          .eq('is_active', true)
-          .order('sort_order')
-          .order('label');
-      var classes = SchoolClassOrder.sorted(
-        rows.map((row) => Map<String, dynamic>.from(row)),
+      final requestedDate = (widget.initialDate ?? '').trim();
+      final effectiveDateToUse = RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(requestedDate)
+          ? requestedDate
+          : dateToUse;
+      final accessPayload = await _fetchAttendanceAccessPayload(
+        schoolRef: schoolRef,
+        dateIso: effectiveDateToUse,
       );
-      // Teachers: only their own standard (all sections). Admin: whole school.
-      try {
-        final allowedIds = await _client.rpc('psm_attendance_class_ids');
-        if (allowedIds is List) {
-          final set = allowedIds.map((e) => '$e').toSet();
-          classes = classes.where((c) => set.contains('${c['id']}')).toList();
-        }
-      } catch (_) {}
+      final classes = accessPayload.classes;
+      final ctIdSet = accessPayload.classTeacherIds;
       if (!mounted) return;
-      final preferredClass = classes.any((row) => '${row['id']}' == (savedClassId ?? ''))
-          ? savedClassId
-          : (classes.isEmpty ? null : '${classes.first['id']}');
+      final requestedClassId = (widget.initialClassId ?? '').trim();
+      final preferredClass = (requestedClassId.isNotEmpty &&
+              classes.any((row) => '${row['id']}' == requestedClassId))
+          ? requestedClassId
+          : (classes.any((row) => '${row['id']}' == (savedClassId ?? ''))
+              ? savedClassId
+              : (classes.isEmpty ? null : '${classes.first['id']}'));
       setState(() {
         _schoolRef = schoolRef;
         _schoolNameLanguage = schoolNameLanguage;
         _schoolNameContext = schoolNameContext;
         _classes = classes;
+        _classTeacherClassIds = ctIdSet;
+        _attendancePermissionMode = accessPayload.permissionMode;
+        _roleByClassId = accessPayload.roleByClassId;
+        _inChargeInfoByClassId = accessPayload.inChargeInfoByClassId;
         _selectedClassId = preferredClass;
-        _date = dateToUse;
+        _date = effectiveDateToUse;
         _mode = effectiveInitialMode;
         _attendanceLockTime = lockTime;
         _threeStepSaveMode = threeStepMode;
@@ -490,17 +785,27 @@ class _SupabaseAttendanceEntryScreenState
 
       final studentRows = await _client
           .from('students')
-          .select('id,class_id,roll_number,gr,name,father_name,mobile,category,gender,is_active,leaving_date')
+          .select('id,class_id,roll_number,gr,name,father_name,mobile,category,gender,is_active,leaving_date,exit_date,enroll_school,enrollment_date,admission_date,custom_fields')
           .eq('school_ref', schoolRef)
           .eq('class_id', classId)
           .eq('is_active', true)
           .order('roll_number');
+      final targetDt = DateTime.tryParse(_date);
       final students = studentRows
           .map((row) => Map<String, dynamic>.from(row))
           .where((row) {
-            final leaving = _text(row['leaving_date']);
+            final leaving = _text(row['leaving_date']).isNotEmpty
+                ? _text(row['leaving_date'])
+                : _text(row['exit_date']);
             if (leaving.length >= 10 &&
                 leaving.substring(0, 10).compareTo(_date) <= 0) {
+              return false;
+            }
+            final enrolled = AttendanceLifecycle.parseEnrollmentDate(row);
+            if (enrolled != null &&
+                targetDt != null &&
+                AttendanceLifecycle.day(targetDt)
+                    .isBefore(AttendanceLifecycle.day(enrolled))) {
               return false;
             }
             return true;
@@ -520,7 +825,6 @@ class _SupabaseAttendanceEntryScreenState
         students[i].raw['roll_number'] = '${i + 1}';
       }
 
-      FirestoreQueryBuilder.invalidateCache('school_settings');
       final latestSettingsRow = await _client
           .from('school_settings')
           .select('config')
@@ -534,7 +838,7 @@ class _SupabaseAttendanceEntryScreenState
 
       final rawDay = await _client
           .from('attendance_days')
-          .select('id,attendance_mode,gender_breakdown,breakfast_total,is_frozen,unfrozen_by_admin,present_saved,mdm_saved,breakfast_saved,present_frozen,mdm_frozen,breakfast_frozen')
+          .select('id,attendance_mode,gender_breakdown,breakfast_total,is_frozen,unfrozen_by_admin,present_saved,mdm_saved,breakfast_saved,present_frozen,mdm_frozen,breakfast_frozen,student_marks,has_embedded_marks')
           .eq('school_ref', schoolRef)
           .eq('class_id', classId)
           .eq('attendance_date', _date)
@@ -547,15 +851,31 @@ class _SupabaseAttendanceEntryScreenState
       final Map<String, Map<String, dynamic>> marksByStudent =
           <String, Map<String, dynamic>>{};
       if (dayId != null && day?['attendance_mode'] != 'direct') {
-        final markRows = await _client
-            .from('student_attendance')
-            .select('student_id,present,mdm,breakfast')
-            .eq('school_ref', schoolRef)
-            .eq('class_id', classId)
-            .eq('attendance_day_id', dayId);
-        for (final row in markRows) {
-          final mark = Map<String, dynamic>.from(row);
-          marksByStudent['${mark['student_id']}'] = mark;
+        final embedded = day?['student_marks'];
+        if (embedded is Map) {
+          embedded.forEach((k, v) {
+            final sid = '$k'.trim();
+            if (sid.isNotEmpty && v is Map) {
+              marksByStudent[sid] = <String, dynamic>{
+                'student_id': sid,
+                'present': v['present'] == true || v['p'] == true || v['p'] == 1,
+                'mdm': v['mdm'] == true || v['m'] == true || v['m'] == 1,
+                'breakfast':
+                    v['breakfast'] == true || v['b'] == true || v['b'] == 1,
+              };
+            }
+          });
+        } else {
+          final markRows = await _client
+              .from('student_attendance')
+              .select('student_id,present,mdm,breakfast')
+              .eq('school_ref', schoolRef)
+              .eq('class_id', classId)
+              .eq('attendance_day_id', dayId);
+          for (final row in markRows) {
+            final mark = Map<String, dynamic>.from(row);
+            marksByStudent['${mark['student_id']}'] = mark;
+          }
         }
       }
 
@@ -654,12 +974,47 @@ class _SupabaseAttendanceEntryScreenState
       setState(() => _error = 'Future-date attendance is not allowed.');
       return;
     }
-    setState(() {
-      _date = dateValue;
-      _error = null;
-      _adminOverrideAuthorized = false;
-      _adminOverrideForIndiaDay = '';
-    });
+    final schoolRef = _schoolRef;
+    if (schoolRef != null && schoolRef.isNotEmpty) {
+      final accessPayload = await _fetchAttendanceAccessPayload(
+        schoolRef: schoolRef,
+        dateIso: dateValue,
+      );
+      if (!mounted) return;
+      final nextClasses = accessPayload.classes;
+      final prevClassId = _selectedClassId;
+      final nextSelectedClassId =
+          (prevClassId != null &&
+              nextClasses.any((c) => '${c['id']}' == prevClassId))
+          ? prevClassId
+          : (nextClasses.isEmpty ? null : '${nextClasses.first['id']}');
+      setState(() {
+        _date = dateValue;
+        _classes = nextClasses;
+        _classTeacherClassIds = accessPayload.classTeacherIds;
+        _attendancePermissionMode = accessPayload.permissionMode;
+        _roleByClassId = accessPayload.roleByClassId;
+        _inChargeInfoByClassId = accessPayload.inChargeInfoByClassId;
+        _selectedClassId = nextSelectedClassId;
+        _error = null;
+        _adminOverrideAuthorized = false;
+        _adminOverrideForIndiaDay = '';
+        if (nextClasses.isEmpty) {
+          _students = <_AttendanceStudent>[];
+          _day = null;
+          _statusMessage =
+              'તારીખ $dateValue માટે તમને કોઈ વર્ગની હાજરી પૂરવાની પરવાનગી નથી (ઇન્ચાર્જ શિક્ષક માત્ર રજાના સમયગાળા દરમિયાન જ હાજરી પૂરી શકે છે).';
+        }
+      });
+      if (nextSelectedClassId == null) return;
+    } else {
+      setState(() {
+        _date = dateValue;
+        _error = null;
+        _adminOverrideAuthorized = false;
+        _adminOverrideForIndiaDay = '';
+      });
+    }
     await _loadClassDate();
   }
 
@@ -1131,27 +1486,71 @@ class _SupabaseAttendanceEntryScreenState
           ? true
           : (nextPresentFrozen && nextMdmFrozen && nextBreakfastFrozen);
 
+      final effectiveMdm = (_threeStepSaveMode && !nextMdmSaved)
+          ? _emptyCounts()
+          : mdm;
+      final effectiveBreakfastTotal =
+          (_threeStepSaveMode && !nextBreakfastSaved) ? 0 : breakfastTotal;
+      if (_threeStepSaveMode && (!nextMdmSaved || !nextBreakfastSaved)) {
+        for (final gEntry in genderBreakdown.entries) {
+          final gMap = gEntry.value;
+          if (gMap is Map) {
+            for (final cEntry in gMap.entries) {
+              final cMap = cEntry.value;
+              if (cMap is Map) {
+                if (!nextMdmSaved) cMap['mdm'] = 0;
+                if (!nextBreakfastSaved) cMap['breakfast'] = 0;
+              }
+            }
+          }
+        }
+      }
+
       final updatedBy = _text(widget.profile['teacher_id']);
       final nowIso = DateTime.now().toUtc().toIso8601String();
+      final Map<String, Map<String, dynamic>>? embeddedStudentMarks =
+          _mode == 'student'
+              ? <String, Map<String, dynamic>>{
+                  for (final student in _students)
+                    '${student.raw['id']}': <String, dynamic>{
+                      'present': student.present,
+                      'mdm': (!_threeStepSaveMode || nextMdmSaved) &&
+                          student.present &&
+                          student.mdm,
+                      'breakfast':
+                          (!_threeStepSaveMode || nextBreakfastSaved) &&
+                              student.present &&
+                              student.breakfast,
+                      if (updatedBy.isNotEmpty)
+                        'updated_by_teacher': updatedBy,
+                    },
+                }
+              : null;
+
       final dayPayload = <String, dynamic>{
         'school_ref': schoolRef,
         'class_id': classId,
         'attendance_date': _date,
         'registered_counts': registered,
         'present_counts': present,
-        'mdm_counts': mdm,
-        'breakfast_total': breakfastTotal,
+        'mdm_counts': effectiveMdm,
+        'breakfast_total': effectiveBreakfastTotal,
         'gender_breakdown': genderBreakdown,
         'attendance_mode': _mode,
         'student_details_saved': _mode == 'student',
+        if (embeddedStudentMarks != null) ...<String, dynamic>{
+          'student_marks': embeddedStudentMarks,
+          'has_embedded_marks': true,
+        },
         'present_saved': nextPresentSaved,
         'mdm_saved': nextMdmSaved,
         'breakfast_saved': nextBreakfastSaved,
         'present_frozen': nextPresentFrozen,
         'mdm_frozen': nextMdmFrozen,
         'breakfast_frozen': nextBreakfastFrozen,
-        'is_frozen': _mode != 'student' ? allFrozenNow : false,
+        'is_frozen': allFrozenNow,
         'unfrozen_by_admin': allFrozenNow ? false : _isUnfrozenByAdmin,
+        if (allFrozenNow) 'frozen_at': nowIso,
         'updated_at': nowIso,
       };
       if (updatedBy.isNotEmpty) dayPayload['updated_by_teacher'] = updatedBy;
@@ -1161,46 +1560,7 @@ class _SupabaseAttendanceEntryScreenState
           .select('id')
           .single();
       final dayId = '${saved['id']}';
-
-      if (_mode == 'student') {
-        final markRows = _students.map((student) {
-          final row = <String, dynamic>{
-            'school_ref': schoolRef,
-            'class_id': classId,
-            'attendance_day_id': dayId,
-            'student_id': '${student.raw['id']}',
-            'present': student.present,
-            'mdm': student.present && student.mdm,
-            'breakfast': student.present && student.breakfast,
-            'updated_at': DateTime.now().toUtc().toIso8601String(),
-          };
-          if (updatedBy.isNotEmpty) row['updated_by_teacher'] = updatedBy;
-          return row;
-        }).toList();
-        if (markRows.isNotEmpty) {
-          await _client.from('student_attendance').upsert(
-                markRows,
-                onConflict: 'attendance_day_id,student_id',
-              );
-        }
-        await _client
-            .from('attendance_days')
-            .update(<String, dynamic>{
-              'present_saved': nextPresentSaved,
-              'mdm_saved': nextMdmSaved,
-              'breakfast_saved': nextBreakfastSaved,
-              'present_frozen': nextPresentFrozen,
-              'mdm_frozen': nextMdmFrozen,
-              'breakfast_frozen': nextBreakfastFrozen,
-              'is_frozen': allFrozenNow,
-              'unfrozen_by_admin': allFrozenNow ? false : _isUnfrozenByAdmin,
-              if (allFrozenNow)
-                'frozen_at': DateTime.now().toUtc().toIso8601String(),
-              'updated_at': DateTime.now().toUtc().toIso8601String(),
-            })
-            .eq('id', dayId)
-            .eq('school_ref', schoolRef);
-      }
+      FirestoreQueryBuilder.invalidateCache('student_attendance');
 
       if (!mounted) return;
       final shouldOfferAbsentWhatsApp =
@@ -1225,6 +1585,10 @@ class _SupabaseAttendanceEntryScreenState
           'attendance_mode': _mode,
           'gender_breakdown': genderBreakdown,
           'breakfast_total': breakfastTotal,
+          if (embeddedStudentMarks != null) ...<String, dynamic>{
+            'student_marks': embeddedStudentMarks,
+            'has_embedded_marks': true,
+          },
           'present_saved': nextPresentSaved,
           'mdm_saved': nextMdmSaved,
           'breakfast_saved': nextBreakfastSaved,
@@ -1237,6 +1601,11 @@ class _SupabaseAttendanceEntryScreenState
         _statusMessage = savedStepMsg;
         _saving = false;
       });
+      if ((section == 'all' || section == 'present') &&
+          _mode == 'student' &&
+          mounted) {
+        await _checkAndShowAbsenceMilestonePopupsForClass();
+      }
       if (shouldOfferAbsentWhatsApp && mounted) {
         await _sendWhatsAppToAllAbsent();
       }
@@ -1246,6 +1615,80 @@ class _SupabaseAttendanceEntryScreenState
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _checkAndShowAbsenceMilestonePopupsForClass() async {
+    final cid = (_selectedClassId ?? '').trim();
+    if (cid.isEmpty || _mode != 'student') return;
+    try {
+      final res = await _client.rpc(
+        'psm_compute_absence_streaks_and_alerts',
+        params: <String, dynamic>{'p_class_id': cid},
+      );
+      if (res is! Map) return;
+      final dueList = (res['due_milestones'] as List? ?? const <dynamic>[])
+          .whereType<Map>()
+          .map((m) => m.map((k, v) => MapEntry('$k', v)))
+          .toList();
+      if (dueList.isEmpty || !mounted) return;
+      final ackKeys = <String>[];
+      final lines = <String>[
+        'સતત ગેરહાજર વિદ્યાર્થીઓ માટે મહત્વપૂર્ણ સૂચના (માત્ર એક જ વાર):',
+        '',
+      ];
+      for (var i = 0; i < dueList.length; i++) {
+        final item = dueList[i];
+        final ack = '${item['ack_key'] ?? ''}'.trim();
+        if (ack.isNotEmpty) ackKeys.add(ack);
+        final name = '${item['student_name'] ?? ''}'.trim();
+        final roll = '${item['roll_number'] ?? ''}'.trim();
+        final mDays = item['milestone'] ?? 0;
+        final msg = '${item['action_message_gu'] ?? ''}'.trim();
+        lines.add(
+          '${i + 1}. $name${roll.isNotEmpty ? ' (રોલ નં. $roll)' : ''}\n'
+          '   • સતત ગેરહાજર: $mDays દિવસ\n'
+          '   • સૂચના: $msg',
+        );
+      }
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogCtx) => AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.deepOrange.shade700),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('⚠️ સતત ગેરહાજર વિદ્યાર્થી સૂચના (${dueList.length})'),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 480,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                lines.join('\n'),
+                style: const TextStyle(fontSize: 14.5, height: 1.45),
+              ),
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(),
+              child: const Text('સમજાઈ ગયું (OK)'),
+            ),
+          ],
+        ),
+      );
+      if (ackKeys.isNotEmpty) {
+        try {
+          await _client.rpc(
+            'psm_ack_absence_alert',
+            params: <String, dynamic>{'p_ack_keys': ackKeys},
+          );
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
   Future<void> _changeClass(String? value) async {
@@ -1336,7 +1779,7 @@ class _SupabaseAttendanceEntryScreenState
               style: TextStyle(fontWeight: FontWeight.w700),
             ),
           ),
-        if (!widget.readOnly && _selectedClassId != null)
+        if (_canManageSelectedClassStudents)
           OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
               visualDensity: VisualDensity.compact,
@@ -1390,17 +1833,27 @@ class _SupabaseAttendanceEntryScreenState
     };
     final studentRows = await _client
         .from('students')
-        .select('id,class_id,roll_number,gr,name,father_name,mobile,category,gender,is_active,leaving_date')
+        .select('id,class_id,roll_number,gr,name,father_name,mobile,category,gender,is_active,leaving_date,exit_date,enroll_school,enrollment_date,admission_date,custom_fields')
         .eq('school_ref', schoolRef)
         .eq('class_id', classId)
         .eq('is_active', true)
         .order('roll_number');
+    final targetDt = DateTime.tryParse(_date);
     final nextStudents = studentRows
         .map((row) => Map<String, dynamic>.from(row))
         .where((row) {
-          final leaving = _text(row['leaving_date']);
+          final leaving = _text(row['leaving_date']).isNotEmpty
+              ? _text(row['leaving_date'])
+              : _text(row['exit_date']);
           if (leaving.length >= 10 &&
               leaving.substring(0, 10).compareTo(_date) <= 0) {
+            return false;
+          }
+          final enrolled = AttendanceLifecycle.parseEnrollmentDate(row);
+          if (enrolled != null &&
+              targetDt != null &&
+              AttendanceLifecycle.day(targetDt)
+                  .isBefore(AttendanceLifecycle.day(enrolled))) {
             return false;
           }
           return true;
@@ -1436,35 +1889,92 @@ class _SupabaseAttendanceEntryScreenState
   }
 
   Future<void> _deactivateStudentInAttendance(_AttendanceStudent target) async {
-    if (widget.readOnly || _saving) return;
+    if (widget.readOnly || _saving || !_canManageSelectedClassStudents) return;
     final classId = _selectedClassId;
     final studentId = _text(target.raw['id']);
     final studentName = _text(target.raw['name']);
     if (classId == null || studentId.isEmpty) return;
 
+    var selectedDate = DateTime.tryParse(_date) ?? DateTime.now();
+    var selectedReason = 'lc';
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Deactive Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો'),
-        content: Text(
-          'શું તમે ખરેખર "$studentName" ને નિષ્ક્રિય (Deactive) કરવા માંગો છો?\n\n'
-          '• માત્ર આ ૧ જ વિદ્યાર્થી Deactive થશે અને રોલ નંબર આપોઆપ ગોઠવાઈ જશે.\n'
-          '• બાકીના વિદ્યાર્થીઓની હાજરી પસંદગી યથાવત રહેશે.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel / રદ કરો'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Deactive / નિષ્ક્રિય કરો'),
-          ),
-        ],
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final dateIso =
+              '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
+          final dateDmy =
+              '${selectedDate.day.toString().padLeft(2, '0')}/${selectedDate.month.toString().padLeft(2, '0')}/${selectedDate.year}';
+          return AlertDialog(
+            title: const Text('Deactive Student? / વિદ્યાર્થીને નિષ્ક્રિય (Deactive) કરો'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'શું તમે ખરેખર "$studentName" ને નિષ્ક્રિય (Deactive) કરવા માંગો છો?\n\n'
+                  '• માત્ર આ ૧ જ વિદ્યાર્થી Deactive થશે અને રોલ નંબર આપોઆપ ગોઠવાઈ જશે.\n'
+                  '• બાકીના વિદ્યાર્થીઓની હાજરી પસંદગી યથાવત રહેશે.',
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: ctx,
+                      initialDate: selectedDate,
+                      firstDate: DateTime(2000, 1, 1),
+                      lastDate: DateTime.now().add(const Duration(days: 365)),
+                    );
+                    if (picked != null) {
+                      setDialogState(() => selectedDate = picked);
+                    }
+                  },
+                  icon: const Icon(Icons.event_outlined),
+                  label: Text('શાળા છોડ્યાની / કમી તારીખ: $dateDmy ($dateIso)'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  initialValue: selectedReason,
+                  decoration: const InputDecoration(
+                    labelText: 'હાજરીપત્રકના મુખપૃષ્ઠ મુજબ કમી કરવાનું કારણ',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'lc',
+                      child: Text('ચાલુ માસમાં લિ. સર્ટી. લઈ ગયેલ'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'continuous_absence',
+                      child: Text('સતત ગેરહાજરીથી નામ કમી કરેલ'),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setDialogState(() => selectedReason = v);
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel / રદ કરો'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Deactive / નિષ્ક્રિય કરો'),
+              ),
+            ],
+          );
+        },
       ),
     );
     if (confirmed != true || !mounted) return;
+    final leavingIso =
+        '${selectedDate.year.toString().padLeft(4, '0')}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
 
     setState(() {
       _saving = true;
@@ -1474,6 +1984,8 @@ class _SupabaseAttendanceEntryScreenState
       await _studentService.archiveStudent(
         classId: classId,
         studentId: studentId,
+        leavingDate: leavingIso,
+        exitReason: selectedReason,
       );
       await _refreshStudentsPreservingMarks();
       if (!mounted) return;
@@ -1494,7 +2006,7 @@ class _SupabaseAttendanceEntryScreenState
   }
 
   Future<void> _openStudentEditorInAttendance([_AttendanceStudent? target]) async {
-    if (widget.readOnly || _saving) return;
+    if (widget.readOnly || _saving || !_canManageSelectedClassStudents) return;
     final classId = _selectedClassId;
     final schoolRef = _schoolRef;
     if (classId == null || schoolRef == null) return;
@@ -2146,8 +2658,10 @@ class _SupabaseAttendanceEntryScreenState
                 const SizedBox(width: 10),
                 Expanded(child: nameAndMeta()),
                 const SizedBox(width: 6),
-                editBtn(),
-                delBtn(),
+                if (_canManageSelectedClassStudents) ...[
+                  editBtn(),
+                  delBtn(),
+                ],
                 const SizedBox(width: 4),
                 Wrap(
                   spacing: 6,
@@ -3289,7 +3803,42 @@ class _SupabaseAttendanceEntryScreenState
     }
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_classes.isEmpty) {
-      return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_statusMessage ?? 'તમને હજુ કોઈ વર્ગ ફાળવાયો નથી. School Admin પાસે તમારો વર્ગ (વર્ગ શિક્ષક) સેટ કરાવો — પછી તમારા ધોરણના બધા વિભાગની હાજરી પૂરી શકશો.', textAlign: TextAlign.center)));
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.fact_check_outlined, size: 42),
+              const SizedBox(height: 10),
+              Text(
+                _statusMessage ??
+                    'આ તારીખ ($_date) માટે તમને કોઈ વર્ગની હાજરી પૂરવાની પરવાનગી નથી.\nહાલનો Admin નિયમ: ${_permissionModeGujaratiSummary()}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _chooseDate,
+                    icon: const Icon(Icons.calendar_month),
+                    label: Text('તારીખ બદલો ($_date)'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: _loadInitial,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Refresh'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
     }
     Map<String, dynamic>? selectedClass;
     for (final row in _classes) {
@@ -3298,8 +3847,18 @@ class _SupabaseAttendanceEntryScreenState
         break;
       }
     }
-    final headerSection = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+    final headerSection = AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      decoration: BoxDecoration(
+        color: _roleBgColorForClass(_selectedClassId),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _roleBorderColorForClass(_selectedClassId),
+          width: 1.4,
+        ),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -3317,31 +3876,57 @@ class _SupabaseAttendanceEntryScreenState
                 child: DropdownButtonFormField<String>(
                   value: _selectedClassId,
                   isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Class',
-                    border: OutlineInputBorder(),
+                  dropdownColor: Colors.white,
+                  decoration: InputDecoration(
+                    labelText: 'Class / વર્ગ',
+                    filled: true,
+                    fillColor: Colors.white.withValues(alpha: 0.92),
+                    border: const OutlineInputBorder(),
                     isDense: true,
                   ),
                   items: _classes
-                      .map((row) => DropdownMenuItem<String>(
-                            value: '${row['id']}',
-                            child: Text(
-                              '${row['label'] ?? row['class_key']} • ${SchoolClassOrder.labelFor(SchoolClassOrder.groupOf(row))}',
-                              overflow: TextOverflow.ellipsis,
+                      .map((row) {
+                        final cid = '${row['id']}';
+                        final tag = _shortRoleTagForClass(cid);
+                        return DropdownMenuItem<String>(
+                          value: cid,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
                             ),
-                          ))
+                            decoration: BoxDecoration(
+                              color: _roleBgColorForClass(cid),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              '${row['label'] ?? row['class_key']} [$tag] • ${SchoolClassOrder.labelFor(SchoolClassOrder.groupOf(row))}',
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: _roleTextColorForClass(cid),
+                              ),
+                            ),
+                          ),
+                        );
+                      })
                       .toList(),
                   onChanged: _changeClass,
                 ),
               ),
               const SizedBox(width: 8),
               OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  backgroundColor: Colors.white.withValues(alpha: 0.92),
+                ),
                 onPressed: _chooseDate,
                 icon: const Icon(Icons.calendar_month),
                 label: Text(_date),
               ),
             ],
           ),
+          const SizedBox(height: 6),
+          _buildSelectedClassRoleBadge(),
           const SizedBox(height: 8),
           _buildModeToggle(),
           if (widget.readOnly) ...[

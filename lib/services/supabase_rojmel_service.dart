@@ -72,4 +72,64 @@ class SupabaseRojmelService {
       'state': state,
     }, onConflict: 'school_ref');
   }
+
+  String _archiveSlug(String value) {
+    final cleaned = value.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
+    final trimmed = cleaned.replaceAll(RegExp(r'^_+|_+$'), '');
+    return trimmed.isEmpty ? 'acc_${value.hashCode.abs()}' : trimmed;
+  }
+
+  /// Stores one immutable read-only FY archive document per (school, FY, account).
+  /// Never read during daily work; keeps active school_rojmel_state small.
+  Future<String> saveFrozenFyArchive({
+    required String schoolRef,
+    required String financialYear,
+    required String accountName,
+    required Map<String, dynamic> archivePayload,
+  }) async {
+    final cleanFy = financialYear.trim();
+    final cleanAcc = accountName.trim();
+    final docId = '${schoolRef}__${_archiveSlug(cleanFy)}__${_archiveSlug(cleanAcc)}';
+    final existing = await _client
+        .from('school_rojmel_fy_archives')
+        .select('id')
+        .eq('id', docId)
+        .maybeSingle();
+    if (existing != null) {
+      throw StateError('FY $cleanFy for "$cleanAcc" is already frozen in archive ($docId).');
+    }
+    await _client.from('school_rojmel_fy_archives').insert(<String, dynamic>{
+      'id': docId,
+      'school_ref': schoolRef,
+      'financial_year': cleanFy,
+      'account_name': cleanAcc,
+      'account_type': _text(archivePayload['accountType']),
+      'entry_count': archivePayload['entryCount'] ?? 0,
+      'totals': archivePayload['totals'] ?? const <String, dynamic>{},
+      'frozen_at': DateTime.now().toUtc().toIso8601String(),
+      'snapshot': archivePayload,
+    });
+    return docId;
+  }
+
+  /// On-demand list of frozen FY archives for this school (0 reads until clicked).
+  Future<List<Map<String, dynamic>>> listFrozenFyArchives(String schoolRef) async {
+    final rows = await _client
+        .from('school_rojmel_fy_archives')
+        .select('id,school_ref,financial_year,account_name,account_type,entry_count,totals,frozen_at')
+        .eq('school_ref', schoolRef)
+        .order('frozen_at', ascending: false);
+    return rows.map((r) => Map<String, dynamic>.from(r)).toList();
+  }
+
+  /// On-demand fetch of one immutable FY archive snapshot.
+  Future<Map<String, dynamic>?> loadFrozenFyArchive(String archiveId) async {
+    final row = await _client
+        .from('school_rojmel_fy_archives')
+        .select('*')
+        .eq('id', archiveId)
+        .maybeSingle();
+    if (row == null) return null;
+    return Map<String, dynamic>.from(row);
+  }
 }

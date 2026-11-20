@@ -328,6 +328,7 @@ class SupabaseSchoolAccessService {
     required String mimeType,
     required String base64Data,
     required int sizeBytes,
+    String? displayDate,
   }) =>
       _invoke('psm-platform-admin', <String, dynamic>{
         'action': 'developer.upload_shared_file',
@@ -338,6 +339,18 @@ class SupabaseSchoolAccessService {
         'mimeType': mimeType,
         'base64Data': base64Data,
         'sizeBytes': sizeBytes,
+        if (displayDate != null && displayDate.trim().isNotEmpty)
+          'displayDate': displayDate.trim(),
+      });
+
+  Future<Map<String, dynamic>> developerPurgeExpiredCloudData({
+    required String developerKey,
+    bool deleteAllSharedFiles = false,
+  }) =>
+      _invoke('psm-platform-admin', <String, dynamic>{
+        'action': 'developer.purge_expired_cloud_data',
+        'developerKey': developerKey,
+        'deleteAllSharedFiles': deleteAllSharedFiles,
       });
 
   Future<void> developerDeleteSharedFile({
@@ -388,6 +401,32 @@ class SupabaseSchoolAccessService {
       await _invoke('psm-platform-admin', <String, dynamic>{
         'action': 'admin.dismiss_validity_reminder',
         'reminderDate': popup['reminderDate'],
+      });
+      return;
+    }
+    if (kind == 'admin_pending_leaves') {
+      // Do not permanently dismiss: Admin should see this on every start until
+      // all pending leave requests are approved or rejected.
+      return;
+    }
+    if (kind == 'teacher_leave_decision') {
+      await _invoke('psm-platform-admin', <String, dynamic>{
+        'action': 'admin.dismiss_teacher_leave_decision',
+        'leaveId': popup['leaveId'],
+      });
+      return;
+    }
+    if (kind == 'daily_meal_menu') {
+      await _invoke('psm-platform-admin', <String, dynamic>{
+        'action': 'admin.dismiss_daily_meal_menu',
+        'menuDate': popup['menuDate'],
+      });
+      return;
+    }
+    if (kind == 'absence_milestone_alert') {
+      await _invoke('psm-platform-admin', <String, dynamic>{
+        'action': 'admin.dismiss_absence_milestone_alert',
+        'ackKeys': popup['ackKeys'] ?? const <String>[],
       });
       return;
     }
@@ -446,6 +485,35 @@ class SupabaseSchoolAccessService {
         'schoolRef': schoolRef,
         'enabled': enabled,
       });
+
+  Future<Map<String, dynamic>> developerSetSchoolModules({
+    required String developerKey,
+    required String schoolRef,
+    required List<String> disabledModules,
+  }) async =>
+      _invoke('psm-platform-admin', <String, dynamic>{
+        'action': 'developer.set_school_modules',
+        'developerKey': developerKey,
+        'schoolRef': schoolRef,
+        'disabledModules': disabledModules,
+      });
+
+  Future<Map<String, dynamic>> developerImpersonateSchoolAdmin({
+    required String developerKey,
+    required String schoolRef,
+  }) async {
+    final result = await _invoke('psm-platform-admin', <String, dynamic>{
+      'action': 'developer.impersonate_school_admin',
+      'developerKey': developerKey,
+      'schoolRef': schoolRef,
+    });
+    _client.activateDeveloperSchoolAdminSession(result);
+    return _asMap(result['profile']);
+  }
+
+  void endDeveloperImpersonation() {
+    _client.deactivateDeveloperSchoolAdminSession();
+  }
 
   Future<Map<String, dynamic>> developerGetLibraryBooksBackupData({
     required String developerKey,

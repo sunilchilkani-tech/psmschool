@@ -17,6 +17,7 @@ import '../services/supabase_attendance_report_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
 import '../widgets/dialogs.dart';
+import '../widgets/admin_daily_attendance_dashboard.dart';
 import 'setup_screen.dart';
 
 /// "🏖️ રજા મેનેજર (ફક્ત આચાર્ય માટે)" block - holiday manager, app
@@ -2686,6 +2687,10 @@ class _AdminPanelState extends State<AdminPanel> {
                 ),
               ],
             ),
+          ),
+          const SizedBox(height: 16),
+          const AdminDailyAttendanceDashboard(
+            initiallyExpanded: true,
           ),
         ],
       ),

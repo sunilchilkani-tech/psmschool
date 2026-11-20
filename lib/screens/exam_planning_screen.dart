@@ -680,7 +680,6 @@ class _ExamPlanningScreenState extends State<ExamPlanningScreen> {
         final prefs = await SharedPreferences.getInstance();
         final jsonStr = exportBackupJsonString();
         await prefs.setString(_examDeviceSaveKey, jsonStr);
-        await prefs.setString('psm_exam_planning_autosave_v1', jsonStr);
       } catch (_) {}
     });
   }
@@ -688,8 +687,11 @@ class _ExamPlanningScreenState extends State<ExamPlanningScreen> {
   Future<void> _loadExamPlanFromDeviceAutoSave() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_examDeviceSaveKey) ??
-          prefs.getString('psm_exam_planning_autosave_v1');
+      final schoolRef = (widget.databaseData['schoolRef'] ?? '').toString().trim();
+      final raw = schoolRef.isNotEmpty
+          ? prefs.getString(_examDeviceSaveKey)
+          : (prefs.getString(_examDeviceSaveKey) ??
+              prefs.getString('psm_exam_planning_autosave_v1'));
       if (raw != null && raw.isNotEmpty) {
         final map = _planningMap(jsonDecode(raw));
         // Use the on-device copy when there is no database copy or when the
